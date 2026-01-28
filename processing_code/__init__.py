@@ -1,14 +1,16 @@
 """
 Processing Code Package
 
-A Python package for converting P4 XML files (EEBO, ECCO, EVAN) to structured 
-page-level CSV data for text mining and machine learning applications.
+A Python package for:
+1. Converting P4 XML files (EEBO, ECCO, EVAN) to structured page-level CSV data
+2. Pretraining BERT models on historical text data
 
 Main exports:
 - parse_xml: Parse a single P4 XML file
 - process_files: Process multiple P4 XML files to DataFrame
 - extract_metadata: Extract bibliographic metadata from XML
 - extract_pages_by_pb: Extract page-level text using page break delimiters
+- Pretraining utilities: load_csv_as_dataset, tokenize_and_chunk_function
 """
 
 from .text_parser import (
