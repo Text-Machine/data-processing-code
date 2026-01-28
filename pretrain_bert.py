@@ -2,19 +2,27 @@
 BERT Pretraining Script for Historical Text Data
 
 Loads CSV data (EEBO, ECCO, EVAN) and prepares it for BERT pretraining.
+Uses efficient Hugging Face Datasets library with dynamic padding.
+
 Each training sample consists of:
 - Date of publication with [TIME] special token
 - 250-token text chunk
 - Both date and text are masked for MLM training
+
+Key optimizations:
+- Dataset.map() with batched=True for fast preprocessing
+- Dynamic padding (only pad to batch max, not dataset max)
+- Arrow file storage for memory efficiency
+- DataCollatorWithPadding for on-the-fly padding
 """
 
 import torch
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Dict
-from torch.utils.data import Dataset, DataLoader
-from transformers import BertTokenizer, BertForMaskedLM, TextDatasetForNextSentencePrediction
+from typing import List, Dict
+from datasets import load_dataset, Dataset, DatasetDict
+from transformers import BertTokenizer, BertForMaskedLM
 from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 import argparse
 import logging
@@ -23,160 +31,104 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class HistoricalTextDataset(Dataset):
+
+def load_csv_as_dataset(csv_paths: List[Path]) -> Dataset:
     """
-    Dataset for pretraining BERT on historical text data.
+    Load CSV files and convert to Hugging Face Dataset format.
     
-    Each sample:
-    - Starts with [TIME] <date> tokens
-    - Followed by up to 250 tokens of text
-    - Both date and text are masked for MLM
+    Uses Apache Arrow storage for memory efficiency.
     """
+    all_data = []
     
-    def __init__(
-        self,
-        csv_paths: List[Path],
-        tokenizer,
-        max_chunk_length: int = 250,
-        date_mask_prob: float = 0.15,
-        text_mask_prob: float = 0.15,
-        max_samples: int = None,
-    ):
-        """
-        Args:
-            csv_paths: List of CSV file paths to load
-            tokenizer: BERT tokenizer
-            max_chunk_length: Maximum tokens per text chunk (default 250)
-            date_mask_prob: Probability of masking date tokens
-            text_mask_prob: Probability of masking text tokens
-            max_samples: Optional limit on number of samples
-        """
-        self.tokenizer = tokenizer
-        self.max_chunk_length = max_chunk_length
-        self.date_mask_prob = date_mask_prob
-        self.text_mask_prob = text_mask_prob
-        self.samples = []
-        
-        # Add special token for time if not already present
-        if "[TIME]" not in tokenizer.vocab:
-            tokenizer.add_tokens(["[TIME]"])
-        
-        self._load_data(csv_paths, max_samples)
+    for csv_path in csv_paths:
+        logger.info(f"Loading {csv_path.name}...")
+        df = pd.read_csv(csv_path)
+        all_data.append(df)
     
-    def _load_data(self, csv_paths: List[Path], max_samples: int = None):
-        """Load and chunk data from CSV files."""
-        total_samples = 0
-        
-        for csv_path in csv_paths:
-            logger.info(f"Loading data from {csv_path.name}")
-            df = pd.read_csv(csv_path)
-            
-            for idx, row in df.iterrows():
-                if max_samples and total_samples >= max_samples:
-                    logger.info(f"Reached max samples limit: {max_samples}")
-                    return
-                
-                date = str(row['date']).strip()
-                text = str(row['page_text']).strip()
-                
-                if not text:
-                    continue
-                
-                # Tokenize text
-                text_tokens = self.tokenizer.tokenize(text)
-                
-                # Create chunks of max_chunk_length tokens
-                for i in range(0, len(text_tokens), self.max_chunk_length):
-                    if max_samples and total_samples >= max_samples:
-                        return
-                    
-                    chunk_tokens = text_tokens[i:i + self.max_chunk_length]
-                    
-                    # Create sample: [CLS] [TIME] <date> <text> [SEP]
-                    self.samples.append({
-                        'date': date,
-                        'text_tokens': chunk_tokens,
-                        'author': row.get('author', 'Unknown'),
-                        'place': row.get('place', 'Unknown'),
-                    })
-                    
-                    total_samples += 1
-        
-        logger.info(f"Total samples created: {len(self.samples)}")
+    # Combine all dataframes
+    combined_df = pd.concat(all_data, ignore_index=True)
+    logger.info(f"Total rows loaded: {len(combined_df)}")
     
-    def __len__(self) -> int:
-        return len(self.samples)
+    # Convert to Hugging Face Dataset
+    dataset = Dataset.from_pandas(combined_df)
+    return dataset
+
+
+def chunk_text_function(example, max_chunk_length: int = 250):
+    """
+    Chunk long text into fixed-length sequences.
     
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Get a training sample with masking applied."""
-        sample = self.samples[idx]
-        date = sample['date']
-        text_tokens = sample['text_tokens']
+    This function is applied with map(batched=True) for efficiency.
+    """
+    # This will be called with batches of examples
+    # We need to handle each text individually and potentially create multiple samples
+    
+    # For now, keep as single row - chunking happens during tokenization
+    return example
+
+
+def tokenize_and_chunk_function(examples, tokenizer, max_chunk_length: int = 250):
+    """
+    Tokenize text and create chunks with date prefix.
+    
+    Applied with map(batched=True) for efficient preprocessing.
+    Uses the fast Rust-backed tokenizer.
+    
+    Format: [CLS] [TIME] <date> <text_chunk> [SEP]
+    """
+    batch_size = len(examples['date'])
+    all_input_ids = []
+    all_attention_masks = []
+    
+    for idx in range(batch_size):
+        date = examples['date'][idx]
+        text = examples['page_text'][idx]
+        
+        if not text or pd.isna(text) or pd.isna(date):
+            continue
+        
+        date_str = str(date).strip()
+        text_str = str(text).strip()
         
         # Tokenize date
-        date_tokens = self.tokenizer.tokenize(date)
+        date_tokens = tokenizer.tokenize(date_str)
         
-        # Build token sequence: [CLS] [TIME] <date> <text> [SEP]
-        tokens = [self.tokenizer.cls_token]
-        tokens.append("[TIME]")
-        tokens.extend(date_tokens)
-        tokens.extend(text_tokens)
-        tokens.append(self.tokenizer.sep_token)
+        # Tokenize text
+        text_tokens = tokenizer.tokenize(text_str)
         
-        # Ensure we don't exceed model's max length
-        max_length = 512  # Standard BERT max length
-        if len(tokens) > max_length:
-            tokens = tokens[:max_length]
-        
-        # Convert tokens to ids
-        input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
-        
-        # Create attention mask
-        attention_mask = [1] * len(input_ids)
-        
-        # Pad to max_length
-        padding_length = max_length - len(input_ids)
-        input_ids.extend([self.tokenizer.pad_token_id] * padding_length)
-        attention_mask.extend([0] * padding_length)
-        
-        # Create labels for MLM (copy of input_ids, -100 for non-masked tokens)
-        labels = input_ids.copy()
-        
-        # Mask date tokens ([TIME] and date tokens)
-        date_end_idx = 2 + len(date_tokens)  # [CLS] [TIME] <date>
-        for i in range(1, date_end_idx):  # Skip [CLS]
-            if np.random.random() < self.date_mask_prob:
-                if np.random.random() < 0.8:
-                    input_ids[i] = self.tokenizer.mask_token_id
-                elif np.random.random() < 0.5:
-                    input_ids[i] = np.random.randint(0, len(self.tokenizer))
-                # else: keep original token
-            else:
-                labels[i] = -100  # Not masked, so loss is 0
-        
-        # Mask text tokens
-        for i in range(date_end_idx, len(input_ids) - 1):  # Skip [SEP] and padding
-            if input_ids[i] == self.tokenizer.pad_token_id:
-                labels[i] = -100  # Don't compute loss on padding
-            elif np.random.random() < self.text_mask_prob:
-                labels[i] = input_ids[i]  # Store original for loss computation
-                if np.random.random() < 0.8:
-                    input_ids[i] = self.tokenizer.mask_token_id
-                elif np.random.random() < 0.5:
-                    input_ids[i] = np.random.randint(0, len(self.tokenizer))
-                # else: keep original token
-            else:
-                labels[i] = -100  # Not masked, so loss is 0
-        
-        # Set [CLS] and [SEP] labels to -100 (don't compute loss on these)
-        labels[0] = -100
-        labels[len(input_ids) - 1 - padding_length] = -100
-        
+        # Create chunks of text with date prefix
+        # Each chunk: [CLS] [TIME] <date> <text_chunk> [SEP]
+        for chunk_start in range(0, len(text_tokens), max_chunk_length):
+            chunk_end = min(chunk_start + max_chunk_length, len(text_tokens))
+            chunk_tokens = text_tokens[chunk_start:chunk_end]
+            
+            # Build full sequence
+            tokens = [tokenizer.cls_token]
+            tokens.append("[TIME]")
+            tokens.extend(date_tokens)
+            tokens.extend(chunk_tokens)
+            tokens.append(tokenizer.sep_token)
+            
+            # Convert to IDs (no padding yet - dynamic padding happens in collator)
+            input_ids = tokenizer.convert_tokens_to_ids(tokens)
+            attention_mask = [1] * len(input_ids)
+            
+            # Check if within model limits
+            if len(input_ids) <= 512:  # BERT max length
+                all_input_ids.append(input_ids)
+                all_attention_masks.append(attention_mask)
+    
+    if not all_input_ids:
+        # Return empty batch if no valid samples
         return {
-            'input_ids': torch.tensor(input_ids, dtype=torch.long),
-            'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
-            'labels': torch.tensor(labels, dtype=torch.long),
+            'input_ids': [],
+            'attention_mask': [],
         }
+    
+    return {
+        'input_ids': all_input_ids,
+        'attention_mask': all_attention_masks,
+    }
 
 
 def main():
@@ -220,21 +172,35 @@ def main():
     
     logger.info(f"Found CSV files: {[f.name for f in csv_files]}")
     
-    # Create dataset
-    logger.info("Creating dataset...")
-    dataset = HistoricalTextDataset(
-        csv_paths=csv_files,
-        tokenizer=tokenizer,
-        max_chunk_length=args.chunk_length,
-        max_samples=args.max_samples,
+    # Load dataset
+    logger.info("Loading datasets from CSV files...")
+    dataset = load_csv_as_dataset(csv_files)
+    
+    # Add special token if needed
+    if "[TIME]" not in tokenizer.vocab:
+        tokenizer.add_tokens(["[TIME]"])
+        logger.info("Added [TIME] token to tokenizer")
+    
+    # Tokenize and chunk using map() with batched=True (efficient!)
+    logger.info("Tokenizing and chunking text (this may take a while)...")
+    tokenized_dataset = dataset.map(
+        lambda examples: tokenize_and_chunk_function(
+            examples, 
+            tokenizer, 
+            max_chunk_length=args.chunk_length
+        ),
+        batched=True,
+        batch_size=1000,  # Process 1000 examples at a time
+        remove_columns=['author', 'place', 'page_text'],  # Remove original columns
+        num_proc=4,  # Use 4 processes for faster preprocessing
     )
     
+    logger.info(f"Preprocessed dataset size: {len(tokenized_dataset)}")
+    
     # Split into train/val (90/10)
-    train_size = int(0.9 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
-    )
+    split_dataset = tokenized_dataset.train_test_split(test_size=0.1, seed=args.seed)
+    train_dataset = split_dataset['train']
+    val_dataset = split_dataset['test']
     
     logger.info(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
     
@@ -261,7 +227,7 @@ def main():
         load_best_model_at_end=True,
     )
     
-    # Data collator
+    # Data collator with dynamic padding (crucial for efficiency!)
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm_probability=0.15,
