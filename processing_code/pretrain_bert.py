@@ -74,7 +74,7 @@ def tokenize_and_chunk_function(examples, tokenizer, max_chunk_length: int = 250
     Applied with map(batched=True) for efficient preprocessing.
     Uses the fast Rust-backed tokenizer.
     
-    Format: [CLS] [TIME] <date> <text_chunk> [SEP]
+    Format: [CLS] <date> [TIME] <text_chunk> [SEP]
     """
     batch_size = len(examples['date'])
     all_input_ids = []
@@ -97,15 +97,15 @@ def tokenize_and_chunk_function(examples, tokenizer, max_chunk_length: int = 250
         text_tokens = tokenizer.tokenize(text_str)
         
         # Create chunks of text with date prefix
-        # Each chunk: [CLS] [TIME] <date> <text_chunk> [SEP]
+        # Each chunk: [CLS] <date> [TIME] <text_chunk> [SEP]
         for chunk_start in range(0, len(text_tokens), max_chunk_length):
             chunk_end = min(chunk_start + max_chunk_length, len(text_tokens))
             chunk_tokens = text_tokens[chunk_start:chunk_end]
             
             # Build full sequence
             tokens = [tokenizer.cls_token]
-            tokens.append("[TIME]")
             tokens.extend(date_tokens)
+            tokens.append("[TIME]")
             tokens.extend(chunk_tokens)
             tokens.append(tokenizer.sep_token)
             
