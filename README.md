@@ -1,111 +1,149 @@
-# Processing Code Package
+# Dataset Download & Metadata Guide
 
-Data processing utilities for converting P4 XML files to structured CSV data.
+This repository aggregates multiple historical and literary corpora from different sources. Below is a concise guide describing how each dataset is obtained and what metadata (if any) accompanies it.
 
-## Installation
+---
 
-From the project root:
+## 1. TCP Collections (EEBO, ECCO, Evans)
 
-```bash
-# Install in development mode
-pip install -e .
+### Datasets
 
-# Or, add to your path when using notebooks
-import sys
-sys.path.insert(0, 'processing_code')
-```
+* EEBO TCP (Early English Books Online – Text Creation Partnership)
+* ECCO TCP (Eighteenth Century Collections Online – TCP)
+* Evans TCP (American Imprints – TCP)
 
-## Usage
+### Download Strategy
 
-### Basic Usage
+These datasets were **manually downloaded** on **March 16, 2026** using the publically available Box URLs listed in the [Text Creation Partnership webpage](https://www.textpartnership.net/pages/faq.html#faq05)  Box offers a [Python SDK](https://github.com/box/box-python-sdk), but this requires some cumbersome steps in order to create a token to be used for programmatic download.
 
-```python
-from processing_code import parse_xml, process_files
+Each dataset corresponds to a separate Box URL:
 
-# Parse a single file
-pages = parse_xml('path/to/file.xml')
+* https://app.box.com/s/jjzmnrx98dkvanipopz3nxkvymnjccht (EEBO)
+* https://app.box.com/s/6jbuf443i145f97c4t56z3garu3u2j09 (ECCO)
+* https://app.box.com/s/zj7pzfokxde4glrhebxsavbbxzyr3ogz (Evans)
 
-# Process multiple files
-df = process_files(
-    xml_files=['file1.xml', 'file2.xml'],
-    output_path='output.csv'
-)
-```
-
-### Supported Formats
-
-- **EEBO** (Early English Books Online) Phase 1 - P4 XML
-- **ECCO** (Eighteenth Century Collections Online) - P4 XML
-- **EVAN** (Evans Early American Imprints) - P4 XML
-
-All formats use uppercase element names: `ETS`, `HEADER`, `EEBO`, `TEXT`, `PB`, etc.
-
-### Output Format
-
-CSV file with page-level granularity:
-
-| author | place | date | page_text |
-|--------|-------|------|-----------|
-| William Shakespeare | London | 1623 | First page of text... |
-| William Shakespeare | London | 1623 | Second page of text... |
-
-Each row represents one page from a document.
-
-## Testing
+After successful download, the raw files were transferred into the MareNostrum 5 filesystem using the command below:
 
 ```bash
-cd processing_code
-python -m pytest test_text_parser.py -v
+rsync -avh --progress eebo_all.zip bsc204326@transfer1.bsc.es:/gpfs/projects/bsc100/textmachine-data/
+rsync -avh --progress ecco_all.zip bsc204326@transfer1.bsc.es:/gpfs/projects/bsc100/textmachine-data/
+rsync -avh --progress evans.zip bsc204326@transfer1.bsc.es:/gpfs/projects/bsc100/textmachine-data/
 ```
 
-Or:
+
+
+
+### Version
+
+* EEBO (Phase I & II)
+* ECCO (final public release)
+* Evans (public release)
+
+
+
+## 2. BL Microsoft Collection
+
+### Description
+
+A large corpus derived from British Library materials, partitioned into 12 chronological subsets. 
+
+### Coverage
+
+* Time span: **1510–1899**
+* Split into **12 datasets**
+
+### Download Strategy
+
+Use the provided bash script:
 
 ```bash
-python -m unittest test_text_parser
+bash bl_microsoft.sh
 ```
 
-## Module Structure
+Each dataset is assigned a different DOI:
+
+* https://doi.org/10.21250/db1 (c. 1510 - 1699)
+* https://doi.org/10.21250/db2 (1700 - 1799)
+* https://doi.org/10.21250/db3 (1800 - 1809)
+* https://doi.org/10.21250/db4 (1810 - 1819)
+* https://doi.org/10.21250/db5 (1820 - 1829)
+* https://doi.org/10.21250/db6 (1830 - 1839)
+* https://doi.org/10.21250/db7 (1840 - 1849)
+* https://doi.org/10.21250/db8 (1850 - 1859)
+* https://doi.org/10.21250/db9 (1860 - 1869)
+* https://doi.org/10.21250/db10 (1870 - 1879)
+* https://doi.org/10.21250/db11 (1880 - 1889)
+* https://doi.org/10.21250/db12 (1890 - 1899)
+
+This script downloads all 12 dataset parts corresponding to the following DOI pattern:
 
 ```
-processing_code/
-├── __init__.py           # Package initialization and exports
-├── text_parser.py        # Core parsing logic
-├── test_text_parser.py   # Unit tests
-└── README.md             # This file
+https://doi.org/10.21250/db1
+...
+https://doi.org/10.21250/db12
 ```
 
-## Functions
+### Versions
 
-### `parse_xml(xml_path) -> List[Dict]`
+Dataset version information is available at the DOI URLs listed above. The datasets have been published in 2014, and uploaded to the British Library website on 2018-12-18.
 
-Parse a single P4 XML file and extract metadata and page-level text.
+## 3. Zenodo-hosted Datasets
 
-**Args:**
-- `xml_path`: Path to P4 XML file
+### Datasets
 
-**Returns:** List of dicts with keys: `author`, `place`, `date`, `page_text`
+* HMD
+* LwM
+* Gallica
+* FreEM
+* ANRChapitres
+* Lattice
+* Roman18
 
-### `process_files(xml_files, output_path=None, max_files=None) -> DataFrame`
+### Download Strategy
 
-Process multiple P4 XML files and optionally save to CSV.
+All datasets are downloaded using the Python script:
 
-**Args:**
-- `xml_files`: List of Path objects pointing to XML files
-- `output_path`: Optional path to save CSV output
-- `max_files`: Optional limit for number of files to process
+```bash
+python zenodo_downloader.py
+```
 
-**Returns:** pandas DataFrame
+Each dataset corresponds to a Zenodo record:
 
-### `extract_metadata(root) -> Dict[str, str]`
+* https://zenodo.org/records/15056046 (HMD)
+* https://zenodo.org/records/15056078 (LwM)
+* https://zenodo.org/records/4751204 (Gallica)
+* https://zenodo.org/records/6481135 (FreEM)
+* https://zenodo.org/records/7446728 (ANRChapitres)
+* https://zenodo.org/records/14178056 (Lattice)
+* https://zenodo.org/records/10404966 (Roman18)
 
-Extract bibliographic metadata from P4 XML HEADER element.
+### Version
 
-**Returns:** Dict with keys: `author`, `place`, `date`
+| Dataset      | Version | Publication date | 
+| -----------  | ----------- | ----------- |
+| HMD  | Version v1 | 2025-09-18 |
+| LwM | Version v1 | 2025-09-18 |
+| Gallica | Version v1 | 2021-04-02 |
+| FreEM | Version 1.0.0 |2022-04-24 |
+| ANRChapitres | Version v1.0.0 | 2022-12-16 |
+| Lattice | Version v0.1.1 | 2024-11-18|
+| Roman18     | Version Version v1.2.1  | 2023-12-21 |
 
-### `extract_pages_by_pb(text_elem, metadata) -> List[Dict]`
 
-Extract page-level text using PB (page break) elements as delimiters.
 
-## License
 
-MIT License - See LICENSE file for details
+## 4. CoNSSA Dataset
+
+### Source
+
+Cloned directly from GitHub:
+
+```bash
+git clone https://github.com/cligs/conssa.git
+```
+
+### Version
+
+The version used is can be retrieved by checking out the commit with hash ID `8fccf669ed1bdbad309ff190f5afb0d6066d70a3` from the `master` branch.
+
+
