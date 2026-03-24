@@ -1,8 +1,6 @@
 # Dataset Download & Metadata Guide
 
-This repository aggregates multiple historical and literary corpora from different sources. Below is a concise guide describing how each dataset is obtained and what metadata (if any) accompanies it.
-
----
+This repository aggregates multiple historical and literary corpora from different sources. Below is a concise guide describing how each dataset is obtained and information about the respective versions.
 
 ## 1. TCP Collections (EEBO, ECCO, Evans)
 
@@ -14,7 +12,7 @@ This repository aggregates multiple historical and literary corpora from differe
 
 ### Download Strategy
 
-These datasets were **manually downloaded** on **March 16, 2026** using the publically available Box URLs listed in the [Text Creation Partnership webpage](https://www.textpartnership.net/pages/faq.html#faq05)  Box offers a [Python SDK](https://github.com/box/box-python-sdk), but this requires some cumbersome steps in order to create a token to be used for programmatic download.
+These datasets were **manually downloaded** on **March 16, 2026** using the publically available Box URLs listed in the [Text Creation Partnership webpage](https://www.textpartnership.net/pages/faq.html#faq05). Box offers a [Python SDK](https://github.com/box/box-python-sdk), but this requires some cumbersome steps in order to create a token to be used for programmatic download.
 
 Each dataset corresponds to a separate Box URL:
 
