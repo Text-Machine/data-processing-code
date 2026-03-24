@@ -108,7 +108,7 @@ python zenodo_downloader.py
 Each dataset corresponds to a Zenodo record:
 
 * https://zenodo.org/records/15056046 (HMD)
-* https://zenodo.org/records/15056078 (LwM)
+* https://zenodo.org/records/17425252 (LwM)
 * https://zenodo.org/records/4751204 (Gallica)
 * https://zenodo.org/records/6481135 (FreEM)
 * https://zenodo.org/records/7446728 (ANRChapitres)
@@ -120,7 +120,7 @@ Each dataset corresponds to a Zenodo record:
 | Dataset      | Version | Publication date | 
 | -----------  | ----------- | ----------- |
 | HMD  | Version v1 | 2025-09-18 |
-| LwM | Version v1 | 2025-09-18 |
+| LwM | Version v2 | 2025-MM-DD (month and day not available) |
 | Gallica | Version v1 | 2021-04-02 |
 | FreEM | Version 1.0.0 |2022-04-24 |
 | ANRChapitres | Version v1.0.0 | 2022-12-16 |
