@@ -2,7 +2,7 @@ from zenodo_get import download
 import os
 
 # List of Zenodo record IDs
-record_ids = ["15056046", "15056078", "4751204","6481135", "7446728", "14178056", "10404966"]
+record_ids = ["15056046", "17425252", "4751204","6481135", "7446728", "14178056", "10404966"]
 
 base_output_dir = "/mnt/files_copied_to_mn5"
 

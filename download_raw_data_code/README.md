@@ -58,32 +58,11 @@ Use the provided bash script:
 bash bl_microsoft.sh
 ```
 
-Each dataset is assigned a different DOI:
+The corpus has been assigned the following DOI: https://doi.org/10.23636/r7w6-zy15. The script above downloads all the 12 dataset parts using the `zenodo_get` Python library.
 
-* https://doi.org/10.21250/db1 (c. 1510 - 1699)
-* https://doi.org/10.21250/db2 (1700 - 1799)
-* https://doi.org/10.21250/db3 (1800 - 1809)
-* https://doi.org/10.21250/db4 (1810 - 1819)
-* https://doi.org/10.21250/db5 (1820 - 1829)
-* https://doi.org/10.21250/db6 (1830 - 1839)
-* https://doi.org/10.21250/db7 (1840 - 1849)
-* https://doi.org/10.21250/db8 (1850 - 1859)
-* https://doi.org/10.21250/db9 (1860 - 1869)
-* https://doi.org/10.21250/db10 (1870 - 1879)
-* https://doi.org/10.21250/db11 (1880 - 1889)
-* https://doi.org/10.21250/db12 (1890 - 1899)
+### Version
 
-This script downloads all 12 dataset parts corresponding to the following DOI pattern:
-
-```
-https://doi.org/10.21250/db1
-...
-https://doi.org/10.21250/db12
-```
-
-### Versions
-
-Dataset version information is available at the DOI URLs listed above. The datasets have been published in 2014, and uploaded to the British Library website on 2018-12-18.
+Dataset version information is available at the DOI URL listed above. The corpus has been published in 2021.
 
 ## 3. Zenodo-hosted Datasets
 
