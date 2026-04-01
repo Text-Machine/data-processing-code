@@ -32,7 +32,7 @@ for entry in "${DATASETS[@]}"; do
     # Clean title for filename
     SAFE_TITLE="${TITLE// /_}"     # replace spaces with underscores
     SAFE_TITLE="${SAFE_TITLE//./}" # remove periods in title
-    FILENAME="$OUTPUT_DIR/OCR_text_${SAFE_TITLE}.zip"
+    FILENAME="$OUTPUT_DIR/OCR_text_${SAFE_TITLE}.tar.gz"
 
     # Skip if file already exists
     if [ -f "$FILENAME" ]; then
