@@ -14,8 +14,8 @@ pandas==3.0.1
 
 ## Preprocessing Logic Summary
 
-### BL Microsoft (preprocess_blmicrosoft.py)
-* Iterates over multiple .tar.gz archives containing compressed .jsonl.gz files (one per book).
+### BL Microsoft (`preprocess_blmicrosoft.py`)
+* Iterates over multiple `.tar.gz` archives containing compressed `.jsonl.gz` files (one per book).
 * Extracts and parses each JSONL file line-by-line.
 * Filters out:
   * Multi-language records
@@ -23,28 +23,31 @@ pandas==3.0.1
 * Aggregates per-book statistics (e.g., mean and standard deviation of OCR word counts).
 * Outputs a single consolidated CSV file with one row per book.
 
-### HMD (preprocess_hmd.py)
-* Processes a ZIP archive containing multiple CSV files.
-* Reads data in chunks to handle large file sizes efficiently.
-* Extracts a unique article_id from file paths.
-* Parses and filters by date (cutoff before 1900).
-* Splits each dataset into:
-  * Metadata (structured fields such as date, title, OCR quality, etc.)
-  * Content (article text)
-* Saves outputs as JSONL files (separate metadata and content files per input CSV).
+### HMD (`preprocess_hmd.py`)
+- Iterates over all CSV files inside a ZIP archive.  
+- Processes the data in chunks. 
+- Generates a normalized `article_id` from the `plain_text_file` path.  
+- Parses the `date` column and applies a cutoff filter (e.g., pre-1900 data).   
+- Extracts additional temporal features: **year, month, and day**.  
+- Splits each chunk into:
+  - **Metadata:** structured fields (e.g., headline, OCR quality, publication details, date features)  
+  - **Content:** raw article text  
+- Writes outputs as JSONL files (one metadata file and one content file per input CSV).
+- Uses `force_ascii=False` when writing JSONL to preserve non-ASCII characters (e.g., accented letters and non-English text).  
 
+---
 
-### LWM (preprocess_lwm.py)
-* Similar pipeline to HMD, applied to a different dataset.
-* Reads CSV files from a ZIP archive in chunks.
-* Cleans and standardizes article_id from filename-based identifiers.
-* Parses and filters by date (cutoff before 1900).
-* Extracts date components (year, month, day).
-* plits data into:
-Metadata
-Content
-* Writes results as JSONL files (one pair per input CSV).
-
+### LWM (`preprocess_lwm.py`)
+- Iterates over all CSV files inside a ZIP archive.  
+- Processes the data in chunks.
+- Cleans and standardizes the `article_id` from source-specific filename identifiers.  
+- Parses the `date` column and applies a cutoff filter (e.g., pre-1900 data).  
+- Extracts **year, month, and day** from the parsed date.  
+- Splits each chunk into:
+  - **Metadata:** structured fields, simialr to the HMD schema  
+  - **Content:** raw article text  
+- Writes outputs as JSONL files (one metadata file and one content file per input CSV).
+- Uses `force_ascii=False` when writing JSONL to preserve non-ASCII characters (e.g., accented letters and non-English text).   
 ---
 
 ## Input Data
