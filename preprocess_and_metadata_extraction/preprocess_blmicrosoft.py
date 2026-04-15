@@ -49,11 +49,9 @@ def process_jsonl_file(file_obj, file_path):
     multi_lang = first.get("multi_language")
     lang = first.get("Language_1")
 
-    # Normalize language
     if isinstance(lang, str):
         lang = lang.strip().capitalize()
 
-    # Normalize multi_language
     is_multilang = str(multi_lang).lower() == "true"
 
     if is_multilang:
@@ -61,6 +59,16 @@ def process_jsonl_file(file_obj, file_path):
 
     if lang not in ALLOWED_LANGS:
         return None
+
+    num_pages = 0
+    num_words = 0
+
+    for r in records:
+        text = r.get("text")
+
+        if text:  # not None / not empty
+            num_pages += 1
+            num_words += len(text.split())
 
     # ---- AGGREGATE ----
     mean_wc = [r["mean_wc_ocr"] for r in records if r.get("mean_wc_ocr") is not None]
@@ -79,6 +87,8 @@ def process_jsonl_file(file_obj, file_path):
         "Country of publication 1": first.get("Country of publication 1"),
         "All Countries of publication": first.get("All Countries of publication"),
         "Language_1": lang,
+        "number_of_pages": num_pages,
+        "number_of_words": num_words,
         "path_to_corresponding_json_file.jsonl": file_path
     }
 
