@@ -6,18 +6,14 @@ import pandas as pd
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
 input_dir = "/gpfs/projects/bsc100/textmachine-data/downloaded_data_vm"
-output_csv = "/gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_blmicrosoft/metadata_tm43_tm28.csv"
+output_csv = "/gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_blmicrosoft/metadata.csv"
 
 os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 
 # ---- FILTER SETTINGS ----
 ALLOWED_LANGS = {"English", "French", "Spanish", "Italian", "Dutch", "Russian"}
 
-# ---- LOAD CLASSIFIER
-#tokenizer = AutoTokenizer.from_pretrained("davanstrien/bl-books-genre")
-#model = AutoModelForSequenceClassification.from_pretrained("davanstrien/bl-books-genre")
-#classifier = pipeline("text-classification", model=model, tokenizer=tokenizer, return_all_scores=True)
-
+# ---- LOAD CLASSIFIER ----
 MODEL_PATH = "/gpfs/scratch/bsc100/paolo/bl-books-genre"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
@@ -51,12 +47,9 @@ TARGET_TARS = [
 def classify_title(title):
     """Return Fiction / Non-fiction scores"""
     try:
-        preds = classifier(title)[0]  # list of dicts
-
+        preds = classifier(title)[0]
         scores = {p["label"]: p["score"] for p in preds}
-
         return scores.get("Fiction", None), scores.get("Non-fiction", None)
-
     except Exception:
         return None, None
 
@@ -88,15 +81,14 @@ def process_jsonl_file(file_obj, file_path):
     if lang not in ALLOWED_LANGS:
         return None
 
-    # ---- DATE FILTER (1800–1900) ----
+    # ---- PARSE DATE (no longer used for filtering) ----
     date = first.get("date")
+    year = None
 
     try:
         year = int(str(date)[:4])
-        if year < 1800 or year > 1900:
-            return None
     except Exception:
-        return None
+        pass
 
     # ---- TEXT STATS ----
     num_pages = 0
@@ -112,35 +104,39 @@ def process_jsonl_file(file_obj, file_path):
     mean_wc = [r["mean_wc_ocr"] for r in records if r.get("mean_wc_ocr") is not None]
     std_wc = [r["std_wc_ocr"] for r in records if r.get("std_wc_ocr") is not None]
 
-    # ---- CLASSIFY TITLE ----
+    # ---- CLASSIFY TITLE only for books between 1800 and 1900 ----
     title = first.get("title", "")
-    fiction_score, nonfiction_score = classify_title(title)
+
+    if year is not None and 1800 <= year <= 1900:
+        fiction_score, nonfiction_score = classify_title(title)
+    else:
+        fiction_score, nonfiction_score = None, None
 
     metadata = {
         "record_id": first.get("record_id"),
         "date": first.get("date"),
-        "title": first.get("title"),
+        "title": title,
         "place": first.get("place"),
         "mean_wc_ocr": sum(mean_wc) / len(mean_wc) if mean_wc else None,
         "std_wc_ocr": sum(std_wc) / len(std_wc) if std_wc else None,
-        "Name": first.get("Name"),
-        "All names": first.get("All names"),
+        "author": first.get("Name"),
+        "all_authors": first.get("All names"),
         "Publisher": first.get("Publisher"),
-        "Country of publication 1": first.get("Country of publication 1"),
-        "All Countries of publication": first.get("All Countries of publication"),
-        "Language_1": lang,
+        "main_publication_country": first.get("Country of publication 1"),
+        "all_publication_countries": first.get("All Countries of publication"),
+        "main_language": lang,
         "number_of_pages": num_pages,
         "number_of_words": num_words,
-        "path_to_corresponding_json_file.jsonl": file_path,
+        "path_to_json": file_path,
         "fiction_score": fiction_score,
-        "nonfiction_score": nonfiction_score
-}
+        "nonfiction_score": nonfiction_score,
+    }
 
     return metadata
 
+
 def process_tar(tar_path):
     """Process one tar.gz archive"""
-
     results = []
 
     with tarfile.open(tar_path, "r:gz") as tar:
@@ -161,7 +157,6 @@ def process_tar(tar_path):
                 continue
 
             try:
-                # ---- decompress inner gzip ----
                 with gzip.open(f, 'rt', encoding='utf-8') as gz:
                     metadata = process_jsonl_file(gz, member.name)
 
@@ -179,7 +174,6 @@ def process_tar(tar_path):
 
 
 # ---- MAIN LOOP ----
-# Write incrementally to avoid memory issues
 first_write = True
 
 for tar_name in TARGET_TARS:
