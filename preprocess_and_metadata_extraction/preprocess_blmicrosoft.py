@@ -121,7 +121,7 @@ def process_jsonl_file(file_obj, file_path):
         "std_wc_ocr": sum(std_wc) / len(std_wc) if std_wc else None,
         "author": first.get("Name"),
         "all_authors": first.get("All names"),
-        "Publisher": first.get("Publisher"),
+        "publisher": first.get("Publisher"),
         "main_publication_country": first.get("Country of publication 1"),
         "all_publication_countries": first.get("All Countries of publication"),
         "main_language": lang,
