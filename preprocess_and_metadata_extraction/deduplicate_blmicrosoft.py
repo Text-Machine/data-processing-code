@@ -10,31 +10,32 @@ The script runs in two distinct phases:
 
 **Phase 1 — Training** (interactive, ~10-15 minutes, run once)::
 
-    python dedupe_by_author.py --input metadata.csv --sample-train
+    python deduplicate_blmicrosoft.py --input metadata.csv --sample-train
 
-A random cross-author sample is drawn, and `dedupe` asks you to label ~10-20
-record pairs as duplicates or non-duplicates (y/n/u, then 'f' to finish).
-The trained model is saved to ``./dedupe_settings/shared_v3.settings`` and the
-labelled pairs to ``./dedupe_settings/shared_training_v3.json``.  You never
+A within-author sample is drawn (so labelled pairs are representative of
+inference), and `dedupe` asks you to label ~10-20 record pairs as duplicates
+or non-duplicates (y/n/u, then 'f' to finish).
+The trained model is saved to ``./dedupe_settings/shared.settings`` and the
+labelled pairs to ``./dedupe_settings/shared_training.json``.  You never
 need to repeat this step.
 
 **Phase 2 — Inference** (fully automated, no user interaction)::
 
-    python dedupe_by_author.py --input metadata.csv
+    python deduplicate_blmicrosoft.py --input metadata.csv
 
 The saved model is loaded and applied to every author's subset of rows.
 Results are written to ``./output/<author_slug>/deduplicated.csv``, with a
-``book_id`` column that groups duplicate records under the same integer id.
+``book_id`` column that groups duplicate records under the same integer id,
+and a ``book_id_score`` column with the mean dedupe confidence for each cluster.
 
-Post-processing
----------------
-After the ML model clusters records, a deterministic substring-merge pass
-catches title-prefix variants that the model tends to miss, e.g.:
-
-- "Oliver Twist"  ↔  "The Adventures of Oliver Twist"
-- "Barnaby Rudge" ↔  "Barnaby Rudge: A Tale of the Riots of Eighty"
-
-See ``should_merge_by_substring()`` for the merging rules.
+Main Changes from previous version
+------------------------------
+- Removed substring-merge post-processing.  
+- Training sample is drawn from the ``TOP_AUTHORS_FOR_TRAINING`` most
+  prolific authors (by record count), capped at ``SAMPLE_SIZE`` rows.
+- ``MATCH_THRESHOLD`` raised from 0.35 → 0.5 
+- Added ``book_id_score`` column (mean cluster confidence) to help audit
+  borderline matches.
 
 Dependencies
 ------------
@@ -46,9 +47,12 @@ Configuration
 -------------
 The key tunables at the top of this file are:
 
-- ``MATCH_THRESHOLD`` — dedupe confidence threshold (lower → more permissive).
-- ``SUBSTRING_MERGE_MAX_RATIO`` — length-ratio cap for Rule 1 substring merges.
-- ``SAMPLE_SIZE`` — number of rows drawn for the training sample.
+- ``MATCH_THRESHOLD`` — dedupe confidence threshold (higher → more conservative).
+- ``SAMPLE_SIZE`` — max rows drawn for the training sample (default: 150).
+- ``TOP_AUTHORS_FOR_TRAINING`` — how many of the most prolific authors to
+  draw the sample from (default: 20).
+- ``OPTIONAL_FIELDS`` — extra columns to use as dedupe signals if present.
+  Do NOT add ``date`` or ``edition`` here — editions are duplicates for us.
 """
 
 import argparse
@@ -67,22 +71,27 @@ from tqdm import tqdm
 
 AUTHOR_COL = "author"
 
-# Confidence threshold passed to dedupe.partition().  Lowered from 0.5 because
-# the model was producing false negatives on this dataset.
-MATCH_THRESHOLD = 0.35
+# Confidence threshold passed to dedupe.partition().
+# Raised from 0.35 — no post-processing safety net means we want fewer false
+# positives even at the cost of missing some true duplicates.
+MATCH_THRESHOLD = 0.5
 
-# Number of rows sampled from the full dataset for interactive training.
-SAMPLE_SIZE = 2_000
+# Number of rows drawn from the top authors for interactive training.
+SAMPLE_SIZE = 150
 
-# Maximum ratio of (longer title / shorter title) lengths for a substring merge
-# to be accepted under Rule 1.  Example at 2.5:
-#   "oliver twist" (13) vs "adventures of oliver twist" (26) → ratio 2.0  ✓
-#   "works of charles dickens" (24) vs "selections from the works …" (46+) → ratio >2.5  ✗
-SUBSTRING_MERGE_MAX_RATIO = 2.5
+# How many of the most prolific authors (by record count) to draw the
+# training sample from.  Prolific authors have the richest within-author
+# title variation and give the labeller the most informative pairs.
+TOP_AUTHORS_FOR_TRAINING = 20
 
-DEDUPE_FIELDS = [
-    dedupe.variables.String("title",  has_missing=True),
-    dedupe.variables.String("author", has_missing=True),
+# Extra columns to use as dedupe signals if present in the input CSV.
+# Each entry is (column_name, dedupe_variable_class, kwargs).
+#
+# NOTE: ``date`` and ``edition`` are deliberately NOT listed here.
+# Different editions of the same work are duplicates for our purposes, so
+# we must not give the model any signal that would cause it to split them.
+OPTIONAL_FIELDS: list[tuple[str, type, dict]] = [
+    ("place", dedupe.variables.String, {"has_missing": True}),
 ]
 
 SHARED_SETTINGS = Path("./dedupe_settings/shared.settings")
@@ -96,11 +105,7 @@ logging.basicConfig(level=logging.WARNING)
 # ---------------------------------------------------------------------------
 
 def slugify(text: str) -> str:
-    """Convert *text* to a filesystem-safe ASCII slug (max 80 chars).
-
-    Normalises Unicode, strips non-alphanumeric characters, lowercases, and
-    replaces whitespace runs with underscores.
-    """
+    """Convert *text* to a filesystem-safe ASCII slug (max 80 chars)."""
     text = unicodedata.normalize("NFKD", text)
     text = text.encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^\w\s-]", "", text).strip().lower()
@@ -117,8 +122,6 @@ def clean_value(val) -> str | None:
 # ---------------------------------------------------------------------------
 # Title normalisation
 # ---------------------------------------------------------------------------
-# Applied only to the record dicts fed to dedupe; the CSV written to disk
-# always retains the original title text so no information is lost.
 
 _LEADING_ARTICLES = re.compile(r"^(the|a|an)\s+", re.IGNORECASE)
 _BRACKET_SUFFIX   = re.compile(r"\s*\[.*?\]")   # e.g. "[With plates.]"
@@ -138,6 +141,9 @@ def normalize_title(val: str | None) -> str | None:
     - collapse whitespace
 
     Returns ``None`` if the result is an empty string.
+
+    Note: normalisation is applied only to dedupe's internal comparison.
+    The CSV on disk always retains the original title text.
     """
     if val is None:
         return None
@@ -150,165 +156,109 @@ def normalize_title(val: str | None) -> str | None:
     return val or None
 
 
-def to_record_dict(df: pd.DataFrame) -> dict[str, dict]:
+def build_fields(available_columns: set[str]) -> list:
+    """Build the list of dedupe fields based on what columns are in the CSV.
+
+    Always includes ``title`` and ``author``.  Adds optional fields from
+    ``OPTIONAL_FIELDS`` only when their column is present in the dataset.
+
+    ``date`` and ``edition`` are intentionally excluded: different editions
+    of the same work are considered duplicates, so the model must not use
+    year or edition number as a splitting signal.
+    """
+    fields: list = [
+        dedupe.variables.String("title",  has_missing=True),
+        dedupe.variables.String("author", has_missing=True),
+    ]
+    for col, cls, kwargs in OPTIONAL_FIELDS:
+        if col in available_columns:
+            fields.append(cls(col, **kwargs))
+            print(f"  + using optional field: '{col}' ({cls.__name__})")
+    return fields
+
+
+def to_record_dict(df: pd.DataFrame, use_cols: list[str]) -> dict[str, dict]:
     """Convert a DataFrame to the ``{record_id: fields}`` format dedupe expects.
 
-    Titles are normalised before comparison so case variants and edition
-    suffixes do not prevent matching.  Authors are left as-is because they
-    are consistently formatted in this dataset.
+    Titles are normalised; all other fields are cleaned but not normalised.
 
     Parameters
     ----------
     df:
-        DataFrame containing at least ``title`` and ``author`` columns.
-
-    Returns
-    -------
-    dict
-        Mapping of ``str(row_index)`` → ``{"title": ..., "author": ...}``.
+        DataFrame slice for one author (or the training sample).
+    use_cols:
+        List of column names to include (must all be present in *df*).
     """
-    return {
-        str(idx): {
-            "title":  normalize_title(clean_value(row.get("title"))),
-            "author": clean_value(row.get("author")),
-        }
-        for idx, row in df.iterrows()
-    }
+    records = {}
+    for idx, row in df.iterrows():
+        record: dict[str, str | None] = {}
+        for col in use_cols:
+            val = clean_value(row.get(col))
+            record[col] = normalize_title(val) if col == "title" else val
+        records[str(idx)] = record
+    return records
 
 
 # ---------------------------------------------------------------------------
-# Substring-merge post-processing
+# Training  — within-author sample
 # ---------------------------------------------------------------------------
 
-def should_merge_by_substring(
-    rep_a: str,
-    rep_b: str,
-    max_length_ratio: float = SUBSTRING_MERGE_MAX_RATIO,
-) -> bool:
-    """Decide whether two normalised titles likely refer to the same work.
+def _top_author_sample(
+    df: pd.DataFrame,
+    n: int,
+    top_k: int = TOP_AUTHORS_FOR_TRAINING,
+    rng_seed: int = 42,
+) -> pd.DataFrame:
+    """Draw up to *n* rows from the *top_k* most prolific authors.
 
-    Two complementary rules are applied:
-
-    **Rule 1 — substring with ratio guard**
-        One title is a substring of the other AND their lengths are within
-        *max_length_ratio* of each other.  The ratio cap prevents short,
-        generic strings (e.g. "works of charles dickens") from absorbing
-        unrelated longer titles.
-
-    **Rule 2 — prefix match (no ratio limit)**
-        The longer title *starts with* the shorter one.  Catches edition
-        subtitles appended after the canonical title, e.g.:
-
-        - "oliver twist"  ↔  "oliver twist with eight illustrations by …"
-        - "dombey and son" ↔  "dombey and son with illustrations by …"
-
-        A prefix match is directional so the false-positive risk is low —
-        "works of charles dickens" does *not* start with
-        "selections from the works of charles dickens".
-
-    Parameters
-    ----------
-    rep_a, rep_b:
-        Normalised representative titles for two clusters.
-    max_length_ratio:
-        Upper bound on ``len(longer) / len(shorter)`` for Rule 1.
-
-    Returns
-    -------
-    bool
-        ``True`` if the titles should be merged into one cluster.
-    """
-    if not rep_a or not rep_b:
-        return False
-
-    shorter, longer = sorted([rep_a, rep_b], key=len)
-
-    if shorter in longer and len(longer) / len(shorter) <= max_length_ratio:
-        return True
-
-    if longer.startswith(shorter):
-        return True
-
-    return False
-
-
-def _representative_title(df: pd.DataFrame, book_id: int) -> str | None:
-    """Return the shortest normalised title in *book_id*'s cluster.
-
-    The shortest title is treated as the most canonical form (e.g. prefer
-    "Oliver Twist" over "The Adventures of Oliver Twist").
-    """
-    titles = [
-        normalize_title(clean_value(t))
-        for t in df.loc[df["book_id"] == book_id, "title"]
-    ]
-    titles = [t for t in titles if t]
-    return min(titles, key=len) if titles else None
-
-
-def apply_substring_merges(df: pd.DataFrame) -> pd.DataFrame:
-    """Merge clusters whose representative titles satisfy the substring rules.
-
-    This post-processing pass catches title-prefix variants that the dedupe
-    model misses, then renumbers ``book_id`` contiguously from 0.
+    Prolific authors have the richest within-author title variation (many
+    editions, collected works, omnibus volumes, etc.), so their records
+    produce the most informative pairs for the active-learning labeller.
+    Only authors with ≥ 2 records are considered.
 
     Parameters
     ----------
     df:
-        DataFrame with a ``book_id`` column produced by the dedupe step.
-
-    Returns
-    -------
-    pd.DataFrame
-        Copy of *df* with updated ``book_id`` values.
+        Full metadata DataFrame (must have ``_author_clean`` column).
+    n:
+        Maximum number of rows to return.
+    top_k:
+        How many of the most prolific authors to draw from.
+    rng_seed:
+        Random seed for reproducibility.
     """
-    cluster_ids = sorted(df["book_id"].unique())
-    book_rep    = {cid: _representative_title(df, cid) for cid in cluster_ids}
-
-    # Build a map from each cluster id to the canonical id it should merge into.
-    merges: dict[int, int] = {}
-    for i, id_a in enumerate(cluster_ids):
-        for id_b in cluster_ids[i + 1:]:
-            if should_merge_by_substring(book_rep.get(id_a), book_rep.get(id_b)):
-                canonical, other = min(id_a, id_b), max(id_a, id_b)
-                merges[other] = canonical
-
-    def resolve(bid: int) -> int:
-        """Follow merge chains to find the ultimate canonical id."""
-        while bid in merges:
-            bid = merges[bid]
-        return bid
-
-    df = df.copy()
-    df["book_id"] = df["book_id"].apply(resolve)
-
-    id_map        = {old: new for new, old in enumerate(sorted(df["book_id"].unique()))}
-    df["book_id"] = df["book_id"].map(id_map)
-
-    return df
+    # Exclude blank/missing authors before counting.
+    named    = df[df["_author_clean"].str.strip() != ""]
+    counts   = named["_author_clean"].value_counts()
+    top_auth = counts[counts >= 2].head(top_k).index
+    eligible = named[named["_author_clean"].isin(top_auth)]
+    return eligible.sample(min(n, len(eligible)), random_state=rng_seed)
 
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
-def train_shared_model(df: pd.DataFrame) -> None:
+def train_shared_model(df: pd.DataFrame, available_columns: set[str]) -> None:
     """Interactively train the shared dedupe model and persist it to disk.
 
-    Draws a random sample from *df*, launches the dedupe active-learning
-    console, and saves the resulting model and training labels so they can
-    be reused without re-labelling.
-
     Parameters
     ----------
     df:
-        The full metadata DataFrame (sampling is done internally).
+        The full metadata DataFrame.
+    available_columns:
+        Set of column names present in *df* (used to select dedupe fields).
     """
-    print(f"\nDrawing a sample of up to {SAMPLE_SIZE} rows for training ...")
-    sample_df = df.sample(min(SAMPLE_SIZE, len(df)), random_state=42)
-    records   = to_record_dict(sample_df)
+    print(
+        f"\nDrawing up to {SAMPLE_SIZE} rows from the "
+        f"top {TOP_AUTHORS_FOR_TRAINING} most prolific authors ..."
+    )
+    sample_df    = _top_author_sample(df, SAMPLE_SIZE)
+    sampled_auth = sample_df["_author_clean"].value_counts()
+    print(f"  Authors in sample ({len(sampled_auth)}):")
+    for auth, cnt in sampled_auth.items():
+        print(f"    {auth!r}: {cnt} rows")
+    fields    = build_fields(available_columns)
+    use_cols  = [f.field for f in fields]
+    records   = to_record_dict(sample_df, use_cols)
 
-    deduper = dedupe.Dedupe(DEDUPE_FIELDS)
+    deduper = dedupe.Dedupe(fields)
 
     if SHARED_TRAINING.exists():
         print(f"Found existing training data at {SHARED_TRAINING} — loading it.")
@@ -345,10 +295,6 @@ def train_shared_model(df: pd.DataFrame) -> None:
 def load_shared_model() -> dedupe.StaticDedupe:
     """Load the pre-trained shared model from disk (read-only).
 
-    Returns
-    -------
-    dedupe.StaticDedupe
-
     Raises
     ------
     FileNotFoundError
@@ -367,13 +313,14 @@ def deduplicate_author(
     author_name: str,
     df: pd.DataFrame,
     deduper: dedupe.StaticDedupe,
+    use_cols: list[str],
     output_dir: Path,
 ) -> pd.DataFrame:
     """Apply the shared model to one author's rows and write the result to disk.
 
-    Each row receives a ``book_id`` integer that identifies its duplicate
-    cluster.  Records with the same ``book_id`` are considered editions or
-    copies of the same work.
+    Each row receives a ``book_id`` integer identifying its duplicate cluster,
+    and a ``book_id_score`` float with the mean dedupe confidence for that
+    cluster (useful for auditing borderline matches).
 
     Parameters
     ----------
@@ -383,13 +330,15 @@ def deduplicate_author(
         Subset of the metadata DataFrame for this author only.
     deduper:
         Pre-loaded ``StaticDedupe`` model (shared across all authors).
+    use_cols:
+        Ordered list of field names the model was trained on.
     output_dir:
         Root output directory; results go to ``output_dir/<slug>/deduplicated.csv``.
 
     Returns
     -------
     pd.DataFrame
-        Copy of *df* with a ``book_id`` column added.
+        Copy of *df* with ``book_id`` and ``book_id_score`` columns added.
     """
     from dedupe.core import BlockingError
 
@@ -402,38 +351,37 @@ def deduplicate_author(
 
     # Trivial case: a single row is its own unique book.
     if len(df) == 1:
-        df["book_id"] = 0
+        df["book_id"]       = 0
+        df["book_id_score"] = 1.0
         df.to_csv(out_path, index=False)
         return df
 
-    records = to_record_dict(df)
+    records = to_record_dict(df, use_cols)
 
     try:
-        clustered = deduper.partition(records, threshold=MATCH_THRESHOLD)
+        clustered = list(deduper.partition(records, threshold=MATCH_THRESHOLD))
     except BlockingError:
         # No candidate pairs were generated; treat every row as unique.
-        df["book_id"] = range(len(df))
+        df["book_id"]       = range(len(df))
+        df["book_id_score"] = 1.0
         df.to_csv(out_path, index=False)
         return df
 
-    record_to_cluster: dict[str, int] = {
-        rid: cluster_id
-        for cluster_id, (record_ids, _scores) in enumerate(clustered)
-        for rid in record_ids
-    }
+    # Build lookup: record_id → (cluster_id, mean_score)
+    record_to_cluster: dict[str, int]   = {}
+    record_to_score:   dict[str, float] = {}
+    for cluster_id, (record_ids, scores) in enumerate(clustered):
+        mean_score = float(sum(scores) / len(scores)) if len(scores) > 0 else 1.0
+        for rid in record_ids:
+            record_to_cluster[rid] = cluster_id
+            record_to_score[rid]   = mean_score
 
-    df["book_id"] = [record_to_cluster.get(str(i), -1) for i in df.index]
+    df["book_id"]       = [record_to_cluster.get(str(i), -1) for i in df.index]
+    df["book_id_score"] = [record_to_score.get(str(i),   1.0) for i in df.index]
 
-    # Renumber contiguously from 0.
+    # Renumber book_id contiguously from 0.
     id_map        = {old: new for new, old in enumerate(sorted(df["book_id"].unique()))}
     df["book_id"] = df["book_id"].map(id_map)
-
-    # Post-processing: merge clusters whose titles are prefix variants.
-    before = df["book_id"].nunique()
-    df     = apply_substring_merges(df)
-    after  = df["book_id"].nunique()
-    if before != after:
-        tqdm.write(f"    substring merge: {before} → {after} clusters")
 
     df.to_csv(out_path, index=False)
     return df
@@ -454,7 +402,7 @@ def main() -> None:
     parser.add_argument(
         "--sample-train",
         action="store_true",
-        help="Train the shared model interactively on a random sample, then exit.",
+        help="Train the shared model interactively on a within-author sample, then exit.",
     )
     args = parser.parse_args()
 
@@ -466,19 +414,25 @@ def main() -> None:
 
     df["_author_clean"] = df[AUTHOR_COL].fillna("").str.strip()
 
+    available_columns = set(df.columns) - {"_author_clean"}
+
     if args.sample_train:
-        train_shared_model(df)
+        train_shared_model(df, available_columns)
         return
 
     print("Loading shared dedupe model ...")
-    deduper = load_shared_model()
+    deduper  = load_shared_model()
+    # Derive use_cols from the same logic used at training time.
+    # Reconstructing from the model object is fragile across dedupe versions.
+    fields   = build_fields(available_columns)
+    use_cols = [f.field for f in fields]
 
     unique_authors = sorted(a for a in df["_author_clean"].unique() if a.strip())
     print(f"  {len(unique_authors):,} unique authors to process.\n")
 
     for author in tqdm(unique_authors, desc="Authors"):
         author_df = df[df["_author_clean"] == author].drop(columns=["_author_clean"])
-        result    = deduplicate_author(author, author_df, deduper, output_dir)
+        result    = deduplicate_author(author, author_df, deduper, use_cols, output_dir)
         tqdm.write(
             f"  {author!r}: {len(result)} rows → {result['book_id'].nunique()} unique books"
         )
