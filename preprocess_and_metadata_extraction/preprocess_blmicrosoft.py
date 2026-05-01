@@ -3,6 +3,7 @@ import tarfile
 import gzip
 import json
 import pandas as pd
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
 input_dir = "/gpfs/projects/bsc100/textmachine-data/downloaded_data_vm"
 output_csv = "/gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_blmicrosoft/metadata.csv"
@@ -11,6 +12,20 @@ os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 
 # ---- FILTER SETTINGS ----
 ALLOWED_LANGS = {"English", "French", "Spanish", "Italian", "Dutch", "Russian"}
+
+# ---- LOAD CLASSIFIER ----
+MODEL_PATH = "/gpfs/scratch/bsc100/paolo/bl-books-genre"
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH, local_files_only=True)
+
+classifier = pipeline(
+    "text-classification",
+    model=model,
+    tokenizer=tokenizer,
+    return_all_scores=True
+)
+
 
 # ---- INPUT FILES ----
 TARGET_TARS = [
@@ -29,9 +44,17 @@ TARGET_TARS = [
 ]
 
 
-def process_jsonl_file(file_obj, file_path):
-    """Process one jsonl (one book)"""
+def classify_title(title):
+    """Return Fiction / Non-fiction scores"""
+    try:
+        preds = classifier(title)[0]
+        scores = {p["label"]: p["score"] for p in preds}
+        return scores.get("Fiction", None), scores.get("Non-fiction", None)
+    except Exception:
+        return None, None
 
+
+def process_jsonl_file(file_obj, file_path):
     records = []
 
     for line in file_obj:
@@ -45,41 +68,68 @@ def process_jsonl_file(file_obj, file_path):
 
     first = records[0]
 
-    # ---- ROBUST FILTERING ----
+    # ---- LANGUAGE FILTER ----
     multi_lang = first.get("multi_language")
     lang = first.get("Language_1")
 
-    # Normalize language
     if isinstance(lang, str):
         lang = lang.strip().capitalize()
 
-    # Normalize multi_language
-    is_multilang = str(multi_lang).lower() == "true"
-
-    if is_multilang:
+    if str(multi_lang).lower() == "true":
         return None
 
     if lang not in ALLOWED_LANGS:
         return None
 
+    # ---- PARSE DATE (no longer used for filtering) ----
+    date = first.get("date")
+    year = None
+
+    try:
+        year = int(str(date)[:4])
+    except Exception:
+        pass
+
+    # ---- TEXT STATS ----
+    num_pages = 0
+    num_words = 0
+
+    for r in records:
+        text = r.get("text")
+        if text:
+            num_pages += 1
+            num_words += len(text.split())
+
     # ---- AGGREGATE ----
     mean_wc = [r["mean_wc_ocr"] for r in records if r.get("mean_wc_ocr") is not None]
     std_wc = [r["std_wc_ocr"] for r in records if r.get("std_wc_ocr") is not None]
 
+    # ---- CLASSIFY TITLE only for books between 1800 and 1900 ----
+    title = first.get("title", "")
+
+    if year is not None and 1800 <= year <= 1900:
+        fiction_score, nonfiction_score = classify_title(title)
+    else:
+        fiction_score, nonfiction_score = None, None
+
     metadata = {
         "record_id": first.get("record_id"),
         "date": first.get("date"),
-        "title": first.get("title"),
+        "title": title,
         "place": first.get("place"),
         "mean_wc_ocr": sum(mean_wc) / len(mean_wc) if mean_wc else None,
         "std_wc_ocr": sum(std_wc) / len(std_wc) if std_wc else None,
-        "Name": first.get("Name"),
-        "All names": first.get("All names"),
-        "Publisher": first.get("Publisher"),
-        "Country of publication 1": first.get("Country of publication 1"),
-        "All Countries of publication": first.get("All Countries of publication"),
-        "Language_1": lang,
-        "path_to_corresponding_json_file.jsonl": file_path
+        "author": first.get("Name"),
+        "all_authors": first.get("All names"),
+        "publisher": first.get("Publisher"),
+        "main_publication_country": first.get("Country of publication 1"),
+        "all_publication_countries": first.get("All Countries of publication"),
+        "main_language": lang,
+        "number_of_pages": num_pages,
+        "number_of_words": num_words,
+        "path_to_json": file_path,
+        "fiction_score": fiction_score,
+        "nonfiction_score": nonfiction_score,
     }
 
     return metadata
@@ -87,7 +137,6 @@ def process_jsonl_file(file_obj, file_path):
 
 def process_tar(tar_path):
     """Process one tar.gz archive"""
-
     results = []
 
     with tarfile.open(tar_path, "r:gz") as tar:
@@ -108,7 +157,6 @@ def process_tar(tar_path):
                 continue
 
             try:
-                # ---- decompress inner gzip ----
                 with gzip.open(f, 'rt', encoding='utf-8') as gz:
                     metadata = process_jsonl_file(gz, member.name)
 
@@ -126,7 +174,6 @@ def process_tar(tar_path):
 
 
 # ---- MAIN LOOP ----
-# Write incrementally to avoid memory issues
 first_write = True
 
 for tar_name in TARGET_TARS:
