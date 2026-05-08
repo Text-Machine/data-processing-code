@@ -92,6 +92,9 @@ DEDUPE_FIELDS = [
 SHARED_SETTINGS = Path("./dedupe_settings/shared.settings")
 SHARED_TRAINING = Path("./dedupe_settings/shared_training.json")
 
+# Sentinel key used to group all rows whose author is NaN or blank.
+_UNKNOWN_AUTHOR = "__unknown__"
+
 logging.basicConfig(level=logging.WARNING)
 
 
@@ -355,8 +358,6 @@ def assign_best_version(df: pd.DataFrame) -> pd.DataFrame:
     Rows with a missing or non-numeric ``mean_wc_ocr`` value are ranked below
     any row with a valid numeric value.  If *all* rows in a cluster lack a
     valid value, ``best_version`` stays 0 for every row in that cluster.
-
-    Rows with ``book_id == -1`` (unprocessed / missing author) receive 0.
     """
     df = df.copy()
     df["best_version"] = 0
@@ -372,8 +373,6 @@ def assign_best_version(df: pd.DataFrame) -> pd.DataFrame:
     ocr = pd.to_numeric(df[OCR_COL], errors="coerce")
 
     for book_id, group in df.groupby("book_id"):
-        if book_id == -1:
-            continue
         group_ocr = ocr.loc[group.index]
         if group_ocr.isna().all():
             # No valid OCR value in this cluster -- leave best_version = 0.
@@ -413,7 +412,14 @@ def main() -> None:
     df = pd.read_csv(args.input, dtype=str, low_memory=False)
     print(f"  {len(df):,} rows loaded.")
 
-    df["_author_clean"] = df[AUTHOR_COL].fillna("").str.strip()
+    # NaN or blank authors are grouped under a sentinel key so they are
+    # deduplicated together rather than skipped.
+    df["_author_clean"] = (
+        df[AUTHOR_COL]
+        .fillna(_UNKNOWN_AUTHOR)
+        .str.strip()
+        .replace("", _UNKNOWN_AUTHOR)
+    )
 
     if args.sample_train:
         train_shared_model(df)
@@ -422,7 +428,7 @@ def main() -> None:
     print("Loading shared dedupe model ...")
     deduper = load_shared_model()
 
-    unique_authors = sorted(a for a in df["_author_clean"].unique() if a.strip())
+    unique_authors = sorted(df["_author_clean"].unique())
     print(f"  {len(unique_authors):,} unique authors to process.\n")
 
     result_frames: list[pd.DataFrame] = []
@@ -433,18 +439,12 @@ def main() -> None:
         result_df, global_counter = deduplicate_author(
             author, author_df, deduper, global_counter
         )
+        display_name = "(unknown author)" if author == _UNKNOWN_AUTHOR else repr(author)
         tqdm.write(
-            f"  {author!r}: {len(result_df)} rows -> "
+            f"  {display_name}: {len(result_df)} rows -> "
             f"{result_df['book_id'].nunique()} unique books"
         )
         result_frames.append(result_df)
-
-    # Rows with a blank/missing author are left unprocessed -- sentinel book_id = -1.
-    unprocessed = df[df["_author_clean"].str.strip() == ""].drop(columns=["_author_clean"])
-    if not unprocessed.empty:
-        unprocessed = unprocessed.copy()
-        unprocessed["book_id"] = -1
-        result_frames.append(unprocessed)
 
     # Reassemble in original row order.
     combined = pd.concat(result_frames).sort_index()
