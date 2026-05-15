@@ -1,16 +1,17 @@
 """
 Filter HMD and LwM newspaper datasets by a list of regex query words.
 
-Usage:
-    python filter_hmd_lwm.py \
-        --dataset lwm \
-        --query-words slave slaves \
-        --output results.jsonl
+Usage (single word — suitable for Slurm job arrays):
+    python filter_hmd_lwm.py --dataset lwm  --query-word slave   --output-dir results/
+    python filter_hmd_lwm.py --dataset hmd  --query-word "factory act" --output-dir results/
 
-    python filter_hmd_lwm.py \
-        --dataset hmd \
-        --query-words "factory act" "child labour" \
-        --output results.jsonl
+Usage (multiple words at once — one output file per word):
+    python filter_hmd_lwm.py --dataset lwm  --query-words slave slaves machine --output-dir results/
+
+The output filename is derived automatically:
+    <output-dir>/<dataset>_<query_word_slugified>.jsonl
+e.g.  results/lwm_slave.jsonl
+      results/hmd_factory_act.jsonl
 """
 
 import re
@@ -18,6 +19,7 @@ import json
 import argparse
 import logging
 from pathlib import Path
+from typing import Iterator
 
 import spacy
 
@@ -29,6 +31,7 @@ def _build_nlp():
     from spacy.lang.en import English
     nlp = English()
     nlp.add_pipe("sentencizer")
+    # Disable everything we don't need to save RAM and CPU
     return nlp
 
 nlp = _build_nlp()
@@ -62,10 +65,6 @@ def rejoin_text(text: str) -> str:
     1. If a line ends with a hyphen, strip the hyphen and join directly to
        the next line (de-hyphenation).
     2. Otherwise, join the two lines with a single space.
-
-    Sentence boundaries are preserved because sentences end with punctuation
-       followed (in the original) by the start of a new line that begins with
-       a capital letter — those spaces are inserted by rule 2.
     """
     lines = text.split("\n")
     parts: list[str] = []
@@ -74,16 +73,13 @@ def rejoin_text(text: str) -> str:
     for line in lines:
         line = line.strip()
         if not line:
-            # Blank line → treat as paragraph separator and flush
             if carry:
                 parts.append(carry)
                 carry = ""
-            parts.append("")          # preserve paragraph gap if needed
-            continue
+            continue                   # drop blank lines — no empty sentinels needed
 
         if carry:
             if carry.endswith("-"):
-                # De-hyphenate: drop the hyphen and glue directly
                 carry = carry[:-1] + line
             else:
                 carry = carry + " " + line
@@ -93,9 +89,7 @@ def rejoin_text(text: str) -> str:
     if carry:
         parts.append(carry)
 
-    # Remove leading/trailing empty strings and collapse to a single string
-    rejoined = " ".join(p for p in parts if p)
-    return rejoined
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -106,15 +100,15 @@ def build_pattern(query_words: list[str]) -> re.Pattern:
     """
     Build a single compiled regex that matches any of the query words/phrases,
     case-insensitively, as whole words.
-
-    Each query word is treated as a literal string (not a regex), so special
-    characters are escaped.  If you want raw regex support, remove the
-    re.escape() call.
     """
     escaped = [re.escape(w) for w in query_words]
-    # \\b word boundaries work for ASCII; for Unicode text use (?<!\w)/(?!\w)
     alternation = "|".join(f"(?<![\\w])(?:{e})(?![\\w])" for e in escaped)
     return re.compile(alternation, re.IGNORECASE)
+
+
+def slugify(word: str) -> str:
+    """Turn a query word/phrase into a safe filename component."""
+    return re.sub(r"[^\w]+", "_", word.strip().lower()).strip("_")
 
 
 # ---------------------------------------------------------------------------
@@ -122,13 +116,8 @@ def build_pattern(query_words: list[str]) -> re.Pattern:
 # ---------------------------------------------------------------------------
 
 def load_metadata(meta_path: Path) -> dict[str, dict]:
-    """
-    Load a *_metadata.jsonl file into a dict keyed by article_id.
-
-    We keep only the fields we need for the output schema.
-    """
     KEEP = {"article_id", "ocr_quality_mean", "ocr_quality_sd",
-            "word_count", "newspaper_title", "location",
+            "newspaper_title", "location",
             "year", "month", "day"}
     meta: dict[str, dict] = {}
     with meta_path.open(encoding="utf-8") as fh:
@@ -145,20 +134,19 @@ def load_metadata(meta_path: Path) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# Core filtering
+# Core filtering  ← KEY CHANGE: generator instead of list accumulation
 # ---------------------------------------------------------------------------
 
 def iter_matches(
     content_path: Path,
     meta_path: Path,
     pattern: re.Pattern,
-) -> list[dict]:
+) -> Iterator[dict]:
     """
-    Yield output records for every article in *content_path* whose (rejoined)
-    text matches *pattern*.
+    Yield one dict per matching sentence.  Memory use is O(1 article) rather
+    than O(all matches in file).
     """
     metadata = load_metadata(meta_path)
-    results = []
 
     with content_path.open(encoding="utf-8") as fh:
         for line in fh:
@@ -168,56 +156,62 @@ def iter_matches(
             record = json.loads(line)
 
             raw_text = record.get("text", "")
+            if not raw_text:
+                continue
+
             processed_text = rejoin_text(raw_text)
 
             if not pattern.search(processed_text):
                 continue
 
             sentences = sentencize(processed_text)
-
             article_id = record.get("article_id")
             meta = metadata.get(article_id, {})
 
-            out = {
-                "article_id":       article_id,
-                "text":             sentences,
-                "ocr_quality_mean": meta.get("ocr_quality_mean"),
-                "ocr_quality_sd":   meta.get("ocr_quality_sd"),
-                "word_count":       meta.get("word_count"),
-                "newspaper_title":  meta.get("newspaper_title"),
-                "location":         meta.get("location"),
-                "year":             meta.get("year"),
-                "month":            meta.get("month"),
-                "day":              meta.get("day"),
-            }
-            results.append(out)
+            for idx, sent in enumerate(sentences):
+                if not pattern.search(sent):
+                    continue
 
-    return results
+                masked_sent = pattern.sub("[MASK]", sent)
+
+                yield {
+                    "article_id":       article_id,
+                    "prev_sentence":    sentences[idx - 1] if idx > 0 else None,
+                    "sentence":         sent,
+                    "masked_sentence":  masked_sent,
+                    "next_sentence":    sentences[idx + 1] if idx < len(sentences) - 1 else None,
+                    "ocr_quality_mean": meta.get("ocr_quality_mean"),
+                    "ocr_quality_sd":   meta.get("ocr_quality_sd"),
+                    "newspaper_title":  meta.get("newspaper_title"),
+                    "location":         meta.get("location"),
+                    "year":             meta.get("year"),
+                    "month":            meta.get("month"),
+                    "day":              meta.get("day"),
+                }
 
 
 def filter_dataset(
     dataset: str,
-    query_words: list[str],
+    query_word: str,
     output_path: Path,
 ) -> None:
     root = DATASET_ROOTS[dataset]
     if not root.exists():
         raise FileNotFoundError(f"Dataset root not found: {root}")
 
-    pattern = build_pattern(query_words)
+    pattern = build_pattern([query_word])
     logging.info("Query pattern: %s", pattern.pattern)
 
-    # Discover all content files
     content_files = sorted(root.glob("*_content.jsonl"))
     if not content_files:
         logging.warning("No *_content.jsonl files found under %s", root)
         return
 
     total_written = 0
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w", encoding="utf-8") as out_fh:
         for content_path in content_files:
-            # Derive the companion metadata path
             meta_path = content_path.with_name(
                 content_path.name.replace("_content.jsonl", "_metadata.jsonl")
             )
@@ -226,18 +220,18 @@ def filter_dataset(
                 continue
 
             logging.info("Processing %s …", content_path.name)
+            file_count = 0
 
             try:
-                matches = iter_matches(content_path, meta_path, pattern)
+                for record in iter_matches(content_path, meta_path, pattern):
+                    out_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    file_count += 1
             except Exception as exc:
                 logging.error("Error processing %s: %s", content_path.name, exc)
                 continue
 
-            for record in matches:
-                out_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-            logging.info("  → %d match(es)", len(matches))
-            total_written += len(matches)
+            logging.info("  → %d match(es)", file_count)
+            total_written += file_count
 
     logging.info("Done. Total records written: %d → %s", total_written, output_path)
 
@@ -257,18 +251,25 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Which dataset to process.",
     )
-    parser.add_argument(
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--query-word",
+        metavar="WORD",
+        help="A single query word / phrase (used by Slurm array jobs).",
+    )
+    group.add_argument(
         "--query-words",
         nargs="+",
-        required=True,
         metavar="WORD",
-        help="One or more query words / phrases to search for.",
+        help="One or more query words; produces one output file per word.",
     )
+
     parser.add_argument(
-        "--output",
+        "--output-dir",
         type=Path,
-        default=Path("filtered_output.jsonl"),
-        help="Path to the output JSONlines file.",
+        default=Path("filtered_output"),
+        help="Directory where per-word output files are written.",
     )
     parser.add_argument(
         "--log-level",
@@ -286,15 +287,23 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    logging.info("Dataset  : %s", args.dataset)
-    logging.info("Query    : %s", args.query_words)
-    logging.info("Output   : %s", args.output)
+    words = [args.query_word] if args.query_word else args.query_words
 
-    filter_dataset(
-        dataset=args.dataset,
-        query_words=args.query_words,
-        output_path=args.output,
-    )
+    for word in words:
+        slug = slugify(word)
+        output_path = args.output_dir / f"{args.dataset}_{slug}.jsonl"
+
+        logging.info("=" * 60)
+        logging.info("Dataset    : %s", args.dataset)
+        logging.info("Query word : %r", word)
+        logging.info("Output     : %s", output_path)
+        logging.info("=" * 60)
+
+        filter_dataset(
+            dataset=args.dataset,
+            query_word=word,
+            output_path=output_path,
+        )
 
 
 if __name__ == "__main__":
