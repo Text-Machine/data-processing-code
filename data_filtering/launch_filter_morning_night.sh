@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=filter_monring_night
+#SBATCH --job-name=filter_morning_night
 #SBATCH --output=slurm_%j.out
 #SBATCH --error=slurm_%j.err
 #SBATCH --nodes=1
@@ -25,7 +25,7 @@ export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
 # ---------------------------------------------------------------------------
 # Output directories
 # ---------------------------------------------------------------------------
-OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/filtered_data/morning_night_filtered
+OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/filtered_data/lwm_hmd
 mkdir -p logs_morning_night_filtered "$OUTPUT_DIR"
 # ---------------------------------------------------------------------------
 # Workload definition
