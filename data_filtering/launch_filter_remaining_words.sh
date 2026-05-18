@@ -31,7 +31,10 @@ export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
 # Output directories
 # ---------------------------------------------------------------------------
 OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/filtered_data/lwm_hmd
-mkdir -p logs_remaining_words_filtered "$OUTPUT_DIR"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="$SCRIPT_DIR/logs_remaining_words_filtered"
+
+mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 
 # ---------------------------------------------------------------------------
 # Workload definition
