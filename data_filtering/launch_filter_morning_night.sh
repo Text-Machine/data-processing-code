@@ -14,7 +14,9 @@
 # ---------------------------------------------------------------------------
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate textmachine_py310
-cd /home/bsc/bsc204326/text_machine_processing
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 # ---------------------------------------------------------------------------
 # Thread controls — prevent NumPy/OpenBLAS/MKL oversubscription
 # ---------------------------------------------------------------------------
