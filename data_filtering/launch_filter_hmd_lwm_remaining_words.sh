@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=12
 #SBATCH --cpus-per-task=2
-#SBATCH --time=00:20:00
+#SBATCH --time=00:50:00
 #SBATCH --account=bsc100
 #SBATCH --qos=gp_debug
 #SBATCH --exclusive
@@ -18,12 +18,12 @@ cd "$SLURM_SUBMIT_DIR"
 SCRIPT_DIR="$SLURM_SUBMIT_DIR"
 LOG_DIR="$SCRIPT_DIR/logs_remaining_words_filtered"
 
-OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/filtered_data/lwm_hmd
-
+#OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/filtered_data/lwm_hmd
+OUTPUT_DIR=/gpfs/scratch/bsc100/paolo/lwm_hmd_repeat_25_05_2026
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 
-SCRIPT=filter_hmd_lwm_simplelogic.py
-# SCRIPT=filter_hmd_lwm_nlpsentencizer.py
+#SCRIPT=filter_hmd_lwm_simplelogic.py
+SCRIPT=filter_hmd_lwm_nlpsentencizer.py
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK

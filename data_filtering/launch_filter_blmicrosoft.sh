@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=8
 #SBATCH --cpus-per-task=2
-#SBATCH --time=00:30:00
+#SBATCH --time=02:00:00
 #SBATCH --account=bsc100
 #SBATCH --qos=gp_debug
 #SBATCH --exclusive
@@ -30,9 +30,12 @@ export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/filtered_data/bl_microsoft
+#OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/filtered_data/bl_microsoft
+OUTPUT_DIR=/gpfs/scratch/bsc100/paolo/bl_microsoft_repeat_25_05_2026
 LOG_DIR="$SLURM_SUBMIT_DIR/logs_filter_blmicrosoft"
-SCRIPT="$SLURM_SUBMIT_DIR/filter_blmicrosoft.py"
+#SCRIPT="$SLURM_SUBMIT_DIR/filter_blmicrosoft.py"
+SCRIPT="$SLURM_SUBMIT_DIR/filter_blmicrosoft_nlpsentencizer.py"
+
 
 mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 
