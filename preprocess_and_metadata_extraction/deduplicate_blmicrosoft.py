@@ -156,19 +156,33 @@ def should_merge_by_substring(
     """Return True if two normalised titles likely refer to the same work.
 
     Rule 1 -- substring with ratio guard:
-        One title is a substring of the other AND their lengths are within
-        *max_length_ratio* of each other.
+        One title is a substring of the other, the match falls on word
+        boundaries, AND their lengths are within *max_length_ratio* of
+        each other.
 
     Rule 2 -- prefix match (no ratio limit):
-        The longer title starts with the shorter one.
+        The longer title starts with the shorter one at a word boundary
+        (i.e. the next character is a space or punctuation, or the longer
+        title ends there).
     """
     if not rep_a or not rep_b:
         return False
     shorter, longer = sorted([rep_a, rep_b], key=len)
-    if shorter in longer and len(longer) / len(shorter) <= max_length_ratio:
+
+    # Build a pattern that requires word boundaries around the shorter title.
+    pattern = r'\b' + re.escape(shorter) + r'\b'
+
+    # Rule 1: substring anywhere in longer, within the length-ratio cap.
+    if (
+        re.search(pattern, longer)
+        and len(longer) / len(shorter) <= max_length_ratio
+    ):
         return True
-    if longer.startswith(shorter):
+
+    # Rule 2: prefix match — longer starts with shorter at a word boundary.
+    if re.match(pattern + r'(\s|$)', longer):
         return True
+
     return False
 
 
@@ -406,7 +420,7 @@ def main() -> None:
     args = parser.parse_args()
 
     input_path  = Path(args.input)
-    output_path = input_path.with_name(input_path.stem + "_deduplicated.csv")
+    output_path = input_path.with_name(input_path.stem + "_deduplicated_29_05_2026.csv")
 
     print(f"Loading {args.input} ...")
     df = pd.read_csv(args.input, dtype=str, low_memory=False)
