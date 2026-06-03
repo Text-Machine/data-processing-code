@@ -33,6 +33,14 @@ GEMMA4_MODEL_KEY = "gemma-4-31b"
 
 DEFAULT_MODEL = "llama-8b"
 
+# ---------------------------------------------------------------------------
+# Model-specific LLM kwargs — tune per model as needed
+# ---------------------------------------------------------------------------
+LLM_KWARGS = {
+    "llama-8b":    {"max_model_len": 4096},
+    "gemma-4-31b": {"max_model_len": 4096, "gpu_memory_utilization": 0.90, "tensor_parallel_size": 4},
+}
+
 
 def resolve_model(model_arg: str) -> str:
     """Return full path: expand shorthand from registry, or pass through if already a path."""
@@ -178,10 +186,11 @@ def classify_genre(df, llm, system_prompt, user_prompt_col, output_col, batch_si
     return df
 
 
-def load_and_classify(model_path, df, output_col, prompt_fn, args):
+def load_and_classify(model_path, model_key, df, output_col, prompt_fn, args):
     """Load a model, run classification, unload it, and return the updated DataFrame."""
     print(f"\nLoading model from: {model_path}")
-    llm = LLM(model=model_path)
+    kwargs = LLM_KWARGS.get(model_key, {"max_model_len": 4096, "gpu_memory_utilization": 0.90})
+    llm = LLM(model=model_path, **kwargs)
 
     sampling_params = {
         "temperature": args.temperature,
@@ -279,17 +288,17 @@ def main():
     )
     print(f"\nExample prompt:\n{df.iloc[0]['user_prompt']}")
 
-    # --- Pass 1: primary model → genre_llm ---
+    # --- Pass 1: primary model → genre_llama-8b ---
     print(f"\n{'='*60}")
     print(f"Pass 1 — primary model: {args.model}")
     print('='*60)
-    df = load_and_classify(primary_model_path, df, "genre_llama-8b", prompt_fn, args)
+    df = load_and_classify(primary_model_path, args.model, df, "genre_llama-8b", prompt_fn, args)
 
-    # --- Pass 2: Gemma-4 → genre_llm_gemma4 ---
+    # --- Pass 2: Gemma-4 → genre_gemma4 ---
     print(f"\n{'='*60}")
     print(f"Pass 2 — Gemma-4: {GEMMA4_MODEL_KEY}")
     print('='*60)
-    df = load_and_classify(gemma4_model_path, df, "genre_gemma4", prompt_fn, args)
+    df = load_and_classify(gemma4_model_path, GEMMA4_MODEL_KEY, df, "genre_gemma4", prompt_fn, args)
 
     # --- Results ---
     print("\nResults:")

@@ -3,14 +3,14 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=40
-#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=80
+#SBATCH --gres=gpu:4
 ##SBATCH --mem=32G
-#SBATCH --time=00:20:00
+#SBATCH --time=00:40:00
 #SBATCH --account=bsc100
-#SBATCH --qos=acc_bsccssh
-##SBATCH --qos=acc_debug
-##SBATCH --exclusive
+##SBATCH --qos=acc_bsccssh
+#SBATCH --qos=acc_debug
+#SBATCH --exclusive
 
 # ---------------------------------------------------------------------------
 # Configuration — edit these before submitting
@@ -21,12 +21,12 @@ mkdir -p "$LOG_DIR"
 
 #export HF_HOME=/gpfs/scratch/$USER/.cache/huggingface
 export HF_HOME=/gpfs/scratch/bsc100/paolo/.cache/huggingface
-ENV_PATH="/gpfs/scratch/bsc100/paolo/.conda/envs/textmachine-llm"
+ENV_PATH="/gpfs/scratch/bsc100/paolo/.conda/envs/textmachine-llm-v4"
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-SCRIPT="$SLURM_SUBMIT_DIR/genre_classifier.py"
+SCRIPT="$SLURM_SUBMIT_DIR/genre_classifier_v9.py"
 OUTPUT_DIR="/gpfs/scratch/bsc100/paolo/llm_genre_classifier_results"
 mkdir -p "$OUTPUT_DIR"
 
