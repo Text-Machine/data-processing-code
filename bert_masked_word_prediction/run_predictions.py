@@ -1,42 +1,28 @@
-#!/usr/bin/env python3
 """
-BERT Masked Word Prediction Script
-Adds top-10 predictions from 3 BERT models to .jsonl files.
-
-Fixes:
-- Proper handling of multiple [MASK] tokens
-- Robust truncation to BERT's 512-token limit
-- Safer reconstruction logic
-- Better exception handling
-- Fixed: skip_special_tokens=False in truncate_to_bert_limit to
-  preserve [MASK] token during decoding
-- Only processes rows where the masked word is in FILTER_WORDS
-- Unwrapped extra bracket layer on single-mask predictions
+BERT Masked Word Prediction Script (multi-GPU, batch_size=64)
+=====================================================================
 """
 
 import json
 import logging
+import logging.handlers
+import multiprocessing as mp
+import os
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
+RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+
 import torch
-from transformers import pipeline
-
+from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 # -------------------------------------------------------------------
-# Logging setup
+# Batch size
 # -------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("bert_predictions.log"),
-        logging.StreamHandler()
-    ]
-)
-
-log = logging.getLogger(__name__)
-
+BATCH_SIZE = 64
 
 # -------------------------------------------------------------------
 # Config
@@ -50,406 +36,396 @@ MODELS = {
     "pred_bert_contemporary": f"{MODELS_BASE}/bert-base-uncased",
 }
 
-INPUT_DIRS = [
-    "/gpfs/projects/bsc100/textmachine-data/filtered_data/lwm_hmd",
-    "/gpfs/projects/bsc100/textmachine-data/filtered_data/lwm_hmd_high_memory",
-    "/gpfs/projects/bsc100/textmachine-data/filtered_data/bl_microsoft",
+UNROLLED_BASE = (
+    "/gpfs/projects/bsc100/textmachine-data/"
+    "filtered_data_unrolled"
+)
+
+INPUT_SUBDIRS = [
+    "lwm_hmd",
+    "lwm_hmd_high_memory",
+    "bl_microsoft",
 ]
 
 OUTPUT_BASE = (
     "/gpfs/projects/bsc100/textmachine-data/"
-    "filtered_data_predictions_bert_mask_predicted_repeat_2"
+    f"filtered_data_predictions_batch64_{RUN_TIMESTAMP}"
 )
 
-# Only process rows where the original masked word (from 'sentence')
-# matches one of these keywords (case-insensitive, exact word match).
 FILTER_WORDS = {"machine", "machines", "slave", "slaves"}
-
-DEVICE = 0 if torch.cuda.is_available() else -1
 
 TOP_K = 10
 BERT_MAX_TOKENS = 512
+MAX_GPUS = 4
+
+LOG_FILE = f"bert_predictions_batch64_{RUN_TIMESTAMP}.log"
+
+
+# -------------------------------------------------------------------
+# Shared logging via a queue
+# -------------------------------------------------------------------
+
+def make_queue_logger(name: str, log_queue: mp.Queue) -> logging.Logger:
+    """Logger for worker processes: sends records to the shared queue."""
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.handlers.QueueHandler(log_queue)
+        logger.addHandler(handler)
+    return logger
+
+
+def start_log_listener(log_queue: mp.Queue, log_file: str) -> mp.Process:
+    """
+    Listener process: drains the queue and writes to file + stderr.
+    Returns the started Process; caller must .join() it after workers finish.
+    """
+    def _listen(q, lf):
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        root = logging.getLogger("listener")
+        root.setLevel(logging.INFO)
+        fh = logging.FileHandler(lf)
+        fh.setFormatter(fmt)
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(fh)
+        root.addHandler(sh)
+
+        while True:
+            try:
+                record = q.get()
+                if record is None:       # sentinel
+                    break
+                root.handle(record)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+
+    p = mp.Process(target=_listen, args=(log_queue, log_file), daemon=False)
+    p.start()
+    return p
+
+
+def make_main_logger(log_file: str) -> logging.Logger:
+    """Direct logger for the main process (not queue-based)."""
+    logger = logging.getLogger("main")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        fh = logging.FileHandler(log_file)
+        fh.setFormatter(fmt)
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        logger.addHandler(fh)
+        logger.addHandler(sh)
+    return logger
+
+
+# -------------------------------------------------------------------
+# Stats dataclass
+# -------------------------------------------------------------------
+
+@dataclass
+class SessionStats:
+    total_files: int = 0
+    total_rows: int = 0
+    session_start: float = field(default_factory=time.monotonic)
+
+    def elapsed_str(self) -> str:
+        secs = time.monotonic() - self.session_start
+        h, rem = divmod(int(secs), 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 # -------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------
 
-def check_gpu_health():
-    """Simple GPU sanity check."""
-
-    if not torch.cuda.is_available():
-        return
-
-    try:
-        log.info("Running GPU health check...")
-
-        x = torch.ones(1000, 1000, device="cuda")
-        _ = x @ x
-
-        del x
-        torch.cuda.empty_cache()
-
-        log.info("GPU health check passed.")
-
-    except Exception as e:
-        log.error(f"GPU health check FAILED: {e}")
-        log.error("Aborting — try a different node or run on CPU.")
-        raise SystemExit(1)
+def gpu_label(device: torch.device) -> str:
+    if device.type == "cuda":
+        idx = device.index or 0
+        return f"GPU:{idx} ({torch.cuda.get_device_name(idx)})"
+    return "CPU"
 
 
 def is_file_complete(input_path: Path, output_path: Path) -> bool:
-    """
-    Check output has the same number of non-blank lines as input.
-    Only counts lines that would pass the keyword filter, since
-    non-matching rows are skipped and not written to output.
-    """
-
     if not output_path.exists():
         return False
+    def count_lines(p: Path) -> int:
+        with open(p, "r", encoding="utf-8") as f:
+            return sum(1 for ln in f if ln.strip())
+    return count_lines(input_path) == count_lines(output_path)
 
-    def count_matching_lines(path):
-        count = 0
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
+
+def row_matches_filter(row: dict) -> bool:
+    masked_sentence  = row.get("masked_sentence") or ""
+    original_sentence = row.get("sentence") or ""
+    for orig, masked in zip(original_sentence.split(), masked_sentence.split()):
+        if masked == "[MASK]":
+            if orig.strip(".,;:!?\"'()-").lower() in FILTER_WORDS:
+                return True
+    return False
+
+
+# -------------------------------------------------------------------
+# Token-level prepare_text — guarantees <=512 tokens reaching BERT
+# -------------------------------------------------------------------
+
+@dataclass
+class PrepareResult:
+    text: str | None
+    input_ids: list[int] | None
+    outcome: str      # "ok_full" | "ok_truncated" | "skip_no_mask" | "skip_mask_lost"
+    token_count: int  # token count of the text actually sent (0 if skipped)
+
+
+def prepare_text(row: dict, tokenizer, log: logging.Logger) -> PrepareResult:
+    """
+    Tokenise the context, apply truncation rules at the *token* level,
+    then decode back to a string that is guaranteed <=512 tokens.
+
+    Rules:
+      1. full_context = prev + masked + next
+         - if <=512 tokens  →  use as-is  (outcome: ok_full)
+         - if  >512 tokens  →  drop prev, try masked + next  (log warning)
+      2. reduced = masked + next, hard-truncated to 512 tokens
+         - if [MASK] id still present  →  decode and use  (outcome: ok_truncated)
+         - if [MASK] id gone           →  drop row        (outcome: skip_mask_lost)
+
+    The returned text is decoded from token ids so that what hits the
+    tokenizer during inference is as close as possible to what we measured.
+    Inference re-tokenizes with truncation=True / max_length=512 as a
+    hard safety net (see worker).
+    """
+    article_id      = row.get("article_id", "<unknown>")
+    prev_sentence   = row.get("prev_sentence")   or ""
+    masked_sentence = row.get("masked_sentence") or ""
+    next_sentence   = row.get("next_sentence")   or ""
+
+    if "[MASK]" not in masked_sentence:
+        return PrepareResult(text=None, input_ids=None,
+                             outcome="skip_no_mask", token_count=0)
+
+    mask_id = tokenizer.mask_token_id
+
+    # --- helper: tokenise with special tokens, return input_ids as list ---
+    def encode(text: str) -> list[int]:
+        return tokenizer(
+            text,
+            add_special_tokens=True,
+            truncation=False,
+            return_attention_mask=False,
+            return_token_type_ids=False,
+        )["input_ids"]
+
+    # --- Rule 1: try full context ---
+    full_text = " ".join(filter(None, [prev_sentence, masked_sentence, next_sentence])).strip()
+    full_ids  = encode(full_text)
+
+    if len(full_ids) <= BERT_MAX_TOKENS:
+        decoded = tokenizer.decode(full_ids, skip_special_tokens=False)
+        return PrepareResult(text=decoded, input_ids=full_ids,
+                             outcome="ok_full", token_count=len(full_ids))
+
+    # --- Rule 2: drop prev_sentence, hard-truncate masked + next ---
+    log.warning(
+        f"Long context — dropping prev_sentence | "
+        f"article_id={article_id} | tokens={len(full_ids)} | threshold={BERT_MAX_TOKENS}"
+    )
+
+    reduced_text = " ".join(filter(None, [masked_sentence, next_sentence])).strip()
+    reduced_ids  = encode(reduced_text)
+    truncated_ids = reduced_ids[:BERT_MAX_TOKENS]   # hard truncation at token level
+
+    if mask_id not in truncated_ids:
+        log.warning(
+            f"Dropping row — [MASK] lost after truncation | "
+            f"article_id={article_id} | "
+            f"reduced_tokens={len(reduced_ids)} | truncated_to={len(truncated_ids)}"
+        )
+        return PrepareResult(text=None, input_ids=None,
+                             outcome="skip_mask_lost", token_count=0)
+
+    decoded = tokenizer.decode(truncated_ids, skip_special_tokens=False)
+    return PrepareResult(text=decoded, input_ids=truncated_ids,
+                         outcome="ok_truncated", token_count=len(truncated_ids))
+
+
+# -------------------------------------------------------------------
+# Worker
+# -------------------------------------------------------------------
+
+def worker(gpu_idx: int, file_queue: mp.Queue, result_queue: mp.Queue, log_queue: mp.Queue):
+
+    device = torch.device(f"cuda:{gpu_idx}")
+    label  = gpu_label(device)
+    log    = make_queue_logger(f"worker_{gpu_idx}", log_queue)
+
+    log.info(f"Worker started | device={label} | pid={os.getpid()}")
+
+    # Load models and tokenizers directly — no pipeline in inference path.
+    # This avoids the double-tokenization bug where pipeline re-tokenizes
+    # decoded strings, producing 513/514-token sequences from <=512-token inputs.
+    models     = {}
+    tokenizers = {}
+
+    for col_name, model_path in MODELS.items():
+        tok = AutoTokenizer.from_pretrained(model_path)
+        tok.model_max_length = BERT_MAX_TOKENS
+        mdl = AutoModelForMaskedLM.from_pretrained(model_path).to(device).eval()
+        tokenizers[col_name] = tok
+        models[col_name]     = mdl
+        log.info(f"Loaded model | device={label} | col={col_name}")
+
+    ref_tokenizer = next(iter(tokenizers.values()))
+
+    while True:
+        item = file_queue.get()
+        if item is None:
+            log.info(f"Worker shutting down | device={label}")
+            break
+
+        filepath, output_dir = item
+        filepath   = Path(filepath)
+        output_dir = Path(output_dir)
+
+        log.info(f"Starting file | device={label} | file={filepath.name} | path={filepath}")
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_path = output_dir / filepath.name
+
+        if is_file_complete(filepath, out_path):
+            log.info(f"Skipping — already complete | device={label} | file={filepath.name}")
+            result_queue.put({"skipped": True, "filepath": str(filepath)})
+            continue
+
+        valid_rows  = []
+        valid_texts = []
+
+        # per-file counters
+        n_no_mask   = 0
+        n_too_long  = 0   # dropped prev
+        n_mask_lost = 0   # [MASK] truncated away
+        n_ok_full   = 0
+        n_ok_trunc  = 0
+
+        with open(filepath, "r", encoding="utf-8") as fin:
+            for line in fin:
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     row = json.loads(line)
-                    if row_matches_filter(row):
-                        count += 1
-                except json.JSONDecodeError:
-                    pass
-        return count
-
-    def count_output_lines(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return sum(1 for line in f if line.strip())
-
-    return count_matching_lines(input_path) == count_output_lines(output_path)
-
-
-def row_matches_filter(row: dict) -> bool:
-    """
-    Returns True if any of the original masked words (from 'sentence')
-    at [MASK] positions matches one of the FILTER_WORDS.
-
-    Matching is case-insensitive and strips punctuation from word edges
-    so that e.g. "machine," or "slaves." are still caught.
-    """
-
-    masked_sentence = row.get("masked_sentence") or ""
-    original_sentence = row.get("sentence") or ""
-
-    masked_words = masked_sentence.split()
-    original_words = original_sentence.split()
-
-    for i, word in enumerate(masked_words):
-        if "[MASK]" in word and i < len(original_words):
-            original_word = original_words[i].strip(".,;:!?\"'()-").lower()
-            if original_word in FILTER_WORDS:
-                return True
-
-    return False
-
-
-def truncate_to_bert_limit(
-    text: str,
-    tokenizer,
-    max_tokens: int = BERT_MAX_TOKENS
-) -> str:
-    """
-    Robust truncation using tokenizer encoding rather than manual
-    token counting.
-
-    Guarantees final sequence length <= BERT max length.
-
-    NOTE: skip_special_tokens=False is intentional — setting it to
-    True would strip [MASK] along with [CLS]/[SEP], causing the
-    fill-mask pipeline to raise "No mask_token found on the input".
-    [CLS] and [SEP] are removed manually below instead.
-    """
-
-    encoded = tokenizer(
-        text,
-        truncation=True,
-        max_length=max_tokens,
-        add_special_tokens=True,
-        return_attention_mask=False,
-        return_token_type_ids=False,
-    )
-
-    decoded = tokenizer.decode(
-        encoded["input_ids"],
-        skip_special_tokens=False,          # preserve [MASK]
-        clean_up_tokenization_spaces=True,
-    )
-
-    # Strip [CLS] / [SEP] wrapper tokens but leave [MASK] intact
-    decoded = decoded.replace("[CLS]", "").replace("[SEP]", "").strip()
-
-    return decoded
-
-
-def predict(pipe, row: dict, tokenizer) -> list:
-    """
-    Handle single or multiple [MASK] tokens.
-
-    Returns a flat list of (token, score) pairs for single-mask rows,
-    or a list-of-lists for multi-mask rows:
-        Single: [('machine', 0.23), ('engine', 0.18), ...]
-        Multi:  [[('machine', 0.23), ...], [('sewing', 0.18), ...]]
-    """
-
-    prev_sentence = row.get("prev_sentence") or ""
-    masked_sentence = row.get("masked_sentence") or ""
-    next_sentence = row.get("next_sentence") or ""
-    original_sentence = row.get("sentence") or ""
-
-    n_masks = masked_sentence.count("[MASK]")
-
-    if n_masks == 0:
-        return []
-
-    # ----------------------------------------------------------------
-    # SINGLE MASK
-    # ----------------------------------------------------------------
-
-    if n_masks == 1:
-
-        text = (
-            f"{prev_sentence} "
-            f"{masked_sentence} "
-            f"{next_sentence}"
-        ).strip()
-
-        text = truncate_to_bert_limit(text, tokenizer)
-
-        if "[MASK]" not in text:
-            log.warning(
-                f"[MASK] lost after truncation "
-                f"(article_id={row.get('article_id', '?')}), skipping."
-            )
-            return []
-
-        try:
-            results = pipe(text, top_k=TOP_K)
-
-            # Return flat list — no extra wrapping bracket
-            return [
-                (
-                    r["token_str"].strip(),
-                    round(r["score"], 4)
-                )
-                for r in results
-            ]
-
-        except Exception as e:
-
-            log.warning(
-                f"Single-mask inference failed "
-                f"(article_id={row.get('article_id', '?')}): {e}"
-            )
-
-            return []
-
-    # ----------------------------------------------------------------
-    # MULTIPLE MASKS
-    # ----------------------------------------------------------------
-
-    masked_words = masked_sentence.split()
-    original_words = original_sentence.split()
-
-    # Positions of masks in tokenized sentence
-    mask_positions = [
-        i
-        for i, word in enumerate(masked_words)
-        if "[MASK]" in word
-    ]
-
-    # Original words corresponding to each mask
-    original_mask_words = []
-
-    for pos in mask_positions:
-
-        if pos < len(original_words):
-            original_mask_words.append(original_words[pos])
-        else:
-            original_mask_words.append("[UNK]")
-
-    all_predictions = []
-
-    # ---------------------------------------------------------------
-    # Run one BERT pass per mask
-    # ---------------------------------------------------------------
-
-    for target_mask_idx in range(n_masks):
-
-        reconstructed_words = []
-        current_mask_idx = 0
-
-        for word in masked_words:
-
-            if "[MASK]" in word:
-
-                if current_mask_idx == target_mask_idx:
-
-                    # Keep this target mask
-                    reconstructed_words.append(word)
-
-                else:
-
-                    # Restore original token
-                    restored = word.replace(
-                        "[MASK]",
-                        original_mask_words[current_mask_idx]
-                    )
-
-                    reconstructed_words.append(restored)
-
-                current_mask_idx += 1
-
-            else:
-                reconstructed_words.append(word)
-
-        reconstructed_sentence = " ".join(reconstructed_words)
-
-        # Validate exactly one [MASK] remains
-        remaining_masks = reconstructed_sentence.count("[MASK]")
-
-        if remaining_masks != 1:
-
-            log.warning(
-                f"Skipping malformed reconstruction "
-                f"(remaining_masks={remaining_masks}, "
-                f"article_id={row.get('article_id', '?')})"
-            )
-
-            all_predictions.append([])
-            continue
-
-        full_text = (
-            f"{prev_sentence} "
-            f"{reconstructed_sentence} "
-            f"{next_sentence}"
-        ).strip()
-
-        # Hard tokenizer truncation
-        full_text = truncate_to_bert_limit(full_text, tokenizer)
-
-        if "[MASK]" not in full_text:
-            log.warning(
-                f"[MASK] lost after truncation "
-                f"(article_id={row.get('article_id', '?')}, "
-                f"mask_idx={target_mask_idx}), skipping."
-            )
-            all_predictions.append([])
-            continue
-
-        try:
-
-            results = pipe(full_text, top_k=TOP_K)
-
-            preds = [
-                (
-                    r["token_str"].strip(),
-                    round(r["score"], 4)
-                )
-                for r in results
-            ]
-
-            all_predictions.append(preds)
-
-        except Exception as e:
-
-            log.warning(
-                f"Multi-mask inference failed "
-                f"(article_id={row.get('article_id', '?')}, "
-                f"mask_idx={target_mask_idx}): {e}"
-            )
-
-            all_predictions.append([])
-
-    return all_predictions
-
-
-def process_file(
-    filepath: Path,
-    pipes: dict,
-    tokenizers: dict,
-    output_dir: Path
-):
-    """
-    Process a single .jsonl file, writing only rows whose masked word
-    matches one of the FILTER_WORDS.
-    """
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    out_path = output_dir / filepath.name
-
-    if is_file_complete(filepath, out_path):
-        log.info(f"  Skipping (already complete): {out_path}")
-        return
-
-    elif out_path.exists():
-        log.warning(
-            f"  Incomplete output found, reprocessing: {out_path}"
+                except Exception:
+                    continue
+
+                if not row_matches_filter(row):
+                    continue
+
+                result = prepare_text(row, ref_tokenizer, log)
+
+                if result.outcome == "skip_no_mask":
+                    n_no_mask += 1
+                    continue
+                if result.outcome == "skip_mask_lost":
+                    n_mask_lost += 1
+                    continue
+                if result.outcome == "ok_truncated":
+                    n_too_long += 1   # prev was dropped
+                    n_ok_trunc += 1
+                if result.outcome == "ok_full":
+                    n_ok_full += 1
+
+                valid_rows.append(row)
+                valid_texts.append(result.text)
+
+        log.info(
+            f"File parsed | device={label} | file={filepath.name} | "
+            f"ok_full={n_ok_full} | ok_truncated={n_ok_trunc} | "
+            f"skipped_no_mask={n_no_mask} | skipped_mask_lost={n_mask_lost}"
         )
 
-    log.info(f"  Processing: {filepath}")
+        if not valid_rows:
+            log.info(f"No valid rows — skipping inference | device={label} | file={filepath.name}")
+            result_queue.put({
+                "skipped": False,
+                "filepath": str(filepath),
+                "rows_written": 0,
+                "gpu_label": label,
+            })
+            continue
 
-    rows_written = 0
-    rows_skipped = 0
+        log.info(
+            f"Running inference | device={label} | file={filepath.name} | rows={len(valid_rows)}"
+        )
 
-    with open(filepath, "r", encoding="utf-8") as fin, \
-         open(out_path, "w", encoding="utf-8") as fout:
+        predictions = {}
 
-        for line_num, line in enumerate(fin, 1):
+        for col_name, mdl in models.items():
+            tokenizer = tokenizers[col_name]
+            col_preds = []
 
-            line = line.strip()
+            for batch_start in range(0, len(valid_texts), BATCH_SIZE):
+                batch_texts = valid_texts[batch_start : batch_start + BATCH_SIZE]
 
-            if not line:
-                continue
+                encoded = tokenizer(
+                    batch_texts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=BERT_MAX_TOKENS,
+                ).to(device)
 
-            try:
-                row = json.loads(line)
+                with torch.no_grad():
+                    outputs = mdl(**encoded)
 
-            except json.JSONDecodeError as e:
+                input_ids = encoded["input_ids"]
 
-                log.warning(
-                    f"  Line {line_num}: JSON parse error — {e}"
-                )
+                for j in range(input_ids.shape[0]):
+                    mask_positions = (
+                        input_ids[j] == tokenizer.mask_token_id
+                    ).nonzero(as_tuple=True)[0]
 
-                continue
+                    if len(mask_positions) == 0:
+                        log.warning(
+                            f"No [MASK] token found in encoded input | "
+                            f"col={col_name} | batch_row={j} | "
+                            f"file={filepath.name}"
+                        )
+                        col_preds.append([])
+                        continue
 
-            # Skip rows whose masked word is not in FILTER_WORDS
-            if not row_matches_filter(row):
-                rows_skipped += 1
-                continue
+                    mask_pos = mask_positions[0].item()
+                    logits   = outputs.logits[j, mask_pos]
+                    probs    = torch.softmax(logits, dim=-1)
+                    top      = torch.topk(probs, TOP_K)
 
-            for col_name, pipe in pipes.items():
+                    col_preds.append([
+                        (tokenizer.decode([tok_id]).strip(), round(score, 4))
+                        for tok_id, score in zip(
+                            top.indices.tolist(), top.values.tolist()
+                        )
+                    ])
 
-                row[col_name] = predict(
-                    pipe,
-                    row,
-                    tokenizers[col_name]
-                )
+            predictions[col_name] = col_preds
 
-            fout.write(
-                json.dumps(row, ensure_ascii=False) + "\n"
-            )
+        with open(out_path, "w", encoding="utf-8") as fout:
+            for i, row in enumerate(valid_rows):
+                for col_name in models:
+                    row[col_name] = predictions[col_name][i]
+                fout.write(json.dumps(row) + "\n")
 
-            rows_written += 1
+        log.info(
+            f"File complete | device={label} | file={filepath.name} | rows_written={len(valid_rows)}"
+        )
 
-            if rows_written % 500 == 0:
-                log.info(f"    {rows_written} rows written...")
-
-    log.info(
-        f"  Written: {out_path} "
-        f"({rows_written} written, {rows_skipped} skipped)"
-    )
+        result_queue.put({
+            "skipped": False,
+            "filepath": str(filepath),
+            "rows_written": len(valid_rows),
+            "gpu_label": label,
+        })
 
 
 # -------------------------------------------------------------------
@@ -457,88 +433,58 @@ def process_file(
 # -------------------------------------------------------------------
 
 def main():
+    log = make_main_logger(LOG_FILE)
 
-    log.info(
-        f"Device: {'GPU' if DEVICE == 0 else 'CPU'}"
-    )
-    log.info(f"Filter words: {sorted(FILTER_WORDS)}")
+    log.info("=" * 80)
+    log.info(f"Run started: {RUN_TIMESTAMP}")
+    log.info(f"Output base: {OUTPUT_BASE}")
+    log.info(f"Log file:    {LOG_FILE}")
 
-    check_gpu_health()
+    n_gpus = min(torch.cuda.device_count(), MAX_GPUS) or 1
+    log.info(f"GPUs to use: {n_gpus}")
 
-    # ---------------------------------------------------------------
-    # Load models
-    # ---------------------------------------------------------------
+    all_files = []
+    for subdir in INPUT_SUBDIRS:
+        input_path = Path(UNROLLED_BASE) / subdir
+        output_dir = Path(OUTPUT_BASE) / subdir
+        for fp in sorted(input_path.glob("*.jsonl")):
+            all_files.append((str(fp), str(output_dir)))
 
-    log.info("Loading models...")
+    log.info(f"Files queued: {len(all_files)}")
+    for fp, _ in all_files:
+        log.info(f"  {fp}")
 
-    pipes = {}
-    tokenizers = {}
+    ctx = mp.get_context("spawn")
 
-    for col_name, model_path in MODELS.items():
+    log_queue    = ctx.Queue()
+    file_queue   = ctx.Queue()
+    result_queue = ctx.Queue()
 
-        log.info(f"  Loading {col_name} from {model_path}")
+    # Start the log listener before workers
+    log_listener = start_log_listener(log_queue, LOG_FILE)
 
-        pipes[col_name] = pipeline(
-            "fill-mask",
-            model=model_path,
-            tokenizer=model_path,
-            device=DEVICE,
-            top_k=TOP_K,
+    for f in all_files:
+        file_queue.put(f)
+    for _ in range(n_gpus):
+        file_queue.put(None)
+
+    workers = []
+    for gpu_idx in range(n_gpus):
+        p = ctx.Process(
+            target=worker,
+            args=(gpu_idx, file_queue, result_queue, log_queue),
         )
+        p.start()
+        workers.append(p)
 
-        tokenizers[col_name] = pipes[col_name].tokenizer
+    for p in workers:
+        p.join()
 
-        log.info(f"  Loaded {col_name}")
+    # Shut down log listener
+    log_queue.put(None)
+    log_listener.join()
 
-    # ---------------------------------------------------------------
-    # Process directories
-    # ---------------------------------------------------------------
-
-    for input_dir in INPUT_DIRS:
-
-        input_path = Path(input_dir)
-
-        if not input_path.exists():
-
-            log.warning(
-                f"Input dir not found, skipping: {input_dir}"
-            )
-
-            continue
-
-        jsonl_files = sorted(
-            input_path.glob("*.jsonl")
-        )
-
-        if not jsonl_files:
-
-            log.warning(
-                f"No .jsonl files found in: {input_dir}"
-            )
-
-            continue
-
-        relative = input_path.relative_to(
-            "/gpfs/projects/bsc100/textmachine-data/filtered_data"
-        )
-
-        output_dir = Path(OUTPUT_BASE) / relative
-
-        log.info(
-            f"\nDirectory: {input_dir}  "
-            f"({len(jsonl_files)} files)"
-        )
-
-        for filepath in jsonl_files:
-
-            process_file(
-                filepath,
-                pipes,
-                tokenizers,
-                output_dir
-            )
-
-    log.info("\nAll done.")
+    log.info("All workers finished.")
 
 
 if __name__ == "__main__":
