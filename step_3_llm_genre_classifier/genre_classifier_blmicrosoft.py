@@ -25,13 +25,11 @@ random.seed(42)
 MODELS_BASE = "/gpfs/projects/bsc100/models"
 
 MODEL_REGISTRY = {
-    "llama-8b":       f"{MODELS_BASE}/meta-llama/Llama-3.1-8B-Instruct",
-    "gemma-4-31b":    f"{MODELS_BASE}/gemma4/gemma-4-31B-it"
+    "llama-8b":    f"{MODELS_BASE}/meta-llama/Llama-3.1-8B-Instruct",
+    "gemma-4-31b": f"{MODELS_BASE}/gemma4/gemma-4-31B-it",
 }
 
-GEMMA4_MODEL_KEY = "gemma-4-31b"
-
-DEFAULT_MODEL = "llama-8b"
+DEFAULT_MODEL = "gemma-4-31b"
 
 # ---------------------------------------------------------------------------
 # Model-specific LLM kwargs — tune per model as needed
@@ -48,7 +46,7 @@ def resolve_model(model_arg: str) -> str:
         path = MODEL_REGISTRY[model_arg]
         print(f"Model shorthand '{model_arg}' → {path}")
         return path
-    return model_arg  # assume it's already a full path
+    return model_arg
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +73,7 @@ SYSTEM_PROMPT = """
     """
 
 # ---------------------------------------------------------------------------
-# Test data (used when --test flag is passed or no CSV is provided)
+# Test data (used when no CSV is provided)
 # ---------------------------------------------------------------------------
 TEST_DATA = [
     {"title": "The Adventures of Huckleberry Finn", "author": "Twain, Mark"},
@@ -121,20 +119,11 @@ def generate_user_prompt_fewshot(fiction_titles, nonfiction_titles, target_title
 
 
 # ---------------------------------------------------------------------------
-# Output normalizer — fallback for models that can't use guided_choice
+# Output normalizer
 # ---------------------------------------------------------------------------
 def normalize_label(raw: str) -> str:
-    """Map any LLM output to 'fiction', 'non-fiction', or 'unknown'.
-
-    Handles edge cases like:
-      - "fiction\nfiction\nnon-fiction"  → takes first line
-      - "fiction_1814"                   → strips trailing non-alpha tokens
-      - "nonfiction"                     → normalised to "non-fiction"
-    """
     text = raw.strip().lower()
-    # Take only the first line
     text = text.splitlines()[0].strip()
-    # Keep only letters and hyphens (drops years, underscores, punctuation, etc.)
     text = re.sub(r"[^a-z\-].*", "", text)
     if text == "fiction":
         return "fiction"
@@ -227,7 +216,7 @@ def parse_args():
     )
     parser.add_argument(
         "--model", type=str, default=DEFAULT_MODEL,
-        help=f"Model shorthand (e.g. 'llama-8b', 'mistral-small') or full path. Default: {DEFAULT_MODEL}",
+        help=f"Model shorthand or full path. Default: {DEFAULT_MODEL}",
     )
     parser.add_argument(
         "--list-models", action="store_true",
@@ -254,7 +243,6 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # --- List models and exit ---
     if args.list_models:
         print("\nAvailable model shorthands:\n")
         for name, path in MODEL_REGISTRY.items():
@@ -262,8 +250,7 @@ def main():
         print()
         return
 
-    primary_model_path = resolve_model(args.model)
-    gemma4_model_path = resolve_model(GEMMA4_MODEL_KEY)
+    model_path = resolve_model(args.model)
 
     # --- GPU info ---
     print(f"CUDA version : {torch.version.cuda}")
@@ -280,7 +267,7 @@ def main():
 
     print(df.head())
 
-    # --- Build prompts (shared by both models) ---
+    # --- Build prompts ---
     prompt_fn = generate_user_prompt_fewshot if args.mode == "fewshot" else generate_user_prompt_zeroshot
     df["user_prompt"] = df.apply(
         lambda x: prompt_fn(FICTION_TITLES, NONFICTION_TITLES, x["title"], x["author"]),
@@ -288,21 +275,15 @@ def main():
     )
     print(f"\nExample prompt:\n{df.iloc[0]['user_prompt']}")
 
-    # --- Pass 1: primary model → genre_llama-8b ---
+    # --- Classify with Gemma-4 ---
     print(f"\n{'='*60}")
-    print(f"Pass 1 — primary model: {args.model}")
+    print(f"Classifying with: {args.model}")
     print('='*60)
-    df = load_and_classify(primary_model_path, args.model, df, "genre_llama-8b", prompt_fn, args)
-
-    # --- Pass 2: Gemma-4 → genre_gemma4 ---
-    print(f"\n{'='*60}")
-    print(f"Pass 2 — Gemma-4: {GEMMA4_MODEL_KEY}")
-    print('='*60)
-    df = load_and_classify(gemma4_model_path, GEMMA4_MODEL_KEY, df, "genre_gemma4", prompt_fn, args)
+    df = load_and_classify(model_path, args.model, df, "genre", prompt_fn, args)
 
     # --- Results ---
     print("\nResults:")
-    print(df[["title", "author", "genre_llama-8b", "genre_gemma4"]].to_string(index=False))
+    print(df[["title", "author", "genre"]].to_string(index=False))
 
     # --- Save ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
