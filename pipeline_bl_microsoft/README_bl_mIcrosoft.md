@@ -10,14 +10,14 @@ This document describes the end-to-end pipeline for producing a fully processed 
 
 Every script file needs to be launched with the associated launcher from its respective directory. Every directory also contains a README.md documenting the script ans associate launcher
 
-| Step | Script | Branch | Execution time | 
-|------|--------|--------|--------| 
-| 1 | `step_1_preprocessing_and_metadata_extraction/preprocess_blmicrosoft.py` | `main` |  13 minutes (Job 41421081) |
-| 2 | `step_2_deduplication/deduplicate_blmicrosoft.py` | `main` | 1h 10 minutes (Job 41430091) |
-| 3 | `step_3_genre_classifier/genre_classifier_blmicrosoft.py` | `main` |  12 minutes (Job 41432292)|
-| 4 | `step_4_data_filtering/filter_data_blmicrosoft.py` | `main` |  17 minutes (Job 41442898)
-| 5 | `step_5_mask_unrolling/unroll_masks.py` | `tm63_bert_masked_word_prediction` |   X minutes (Job)|
-| 6 | `step_6_masked_word_prediction/run_predictions.py` | `tm63_bert_masked_word_prediction` |   X minutes (Job) |
+| Step | Script | Execution time | 
+|------|--------|--------| 
+| 1 | `step_1_preprocessing_and_metadata_extraction/preprocess_blmicrosoft.py`  |  13 minutes (Job 41421081) |
+| 2 | `step_2_deduplication/deduplicate_blmicrosoft.py` | 1h 10 minutes (Job 41430091) |
+| 3 | `step_3_genre_classifier/genre_classifier_blmicrosoft.py`|  12 minutes (Job 41432292)|
+| 4 | `step_4_data_filtering/filter_data_blmicrosoft.py`|  17 minutes (Job 41442898)
+| 5 | `step_5_mask_unrolling/unroll_masks.py`  |   1 minute (Job 41448457)|
+| 6 | `step_6_masked_word_prediction/run_predictions.py` |   X minutes (Job 41584125) |
 ---
 
 ## Step 1 — Preprocessing and Metadata Extraction
