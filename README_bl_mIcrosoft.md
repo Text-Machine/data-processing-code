@@ -14,10 +14,10 @@ Every script file needs to be launched with the associated launcher from its res
 |------|--------|--------|--------| 
 | 1 | `step_1_preprocessing_and_metadata_extraction/preprocess_blmicrosoft.py` | `main` |  13 minutes (Job 41421081) |
 | 2 | `step_2_deduplication/deduplicate_blmicrosoft.py` | `main` | 1h 10 minutes (Job 41430091) |
-| 3 | `step_3_llm_genre_classifier/genre_classifier_blmicrosoft.py` | `main` |  X minutes |
-| 4 | `genre_classifier.py` | `tm62_llm_genre_classifier` |  10 minutes |
-| 5 | `run_predictions.py` | `tm63_bert_masked_word_prediction` |   10 minutes |
-
+| 3 | `step_3_genre_classifier/genre_classifier_blmicrosoft.py` | `main` |  12 minutes (Job 41432292)|
+| 4 | `step_4_data_filtering/filter_data_blmicrosoft.py` | `main` |  17 minutes (Job 41442898)
+| 5 | `step_5_mask_unrolling/unroll_masks.py` | `tm63_bert_masked_word_prediction` |   X minutes (Job)|
+| 6 | `step_6_masked_word_prediction/run_predictions.py` | `tm63_bert_masked_word_prediction` |   X minutes (Job) |
 ---
 
 ## Step 1 — Preprocessing and Metadata Extraction
@@ -57,64 +57,42 @@ sbatch launch.sh
 
 ## Step 4 — Data Filtering with query words
 
-Filter dataset by different query words, with sentence-level output
-including context sentences and masked versions.
+Filter dataset by different query words, with sentence-level output including context sentences and masked versions.
 
 
 ```bash
-bash data_filtering/launch_filter_blmicrosoft.sh
+cd step_4_data_filtering/
+sbatch launch.sh
 ```
 
-**To run manually:**
-```bash
-python data_filtering/filter_blmicrosoft.py
-```
+
 
 ---
 
 ## Step 5 — Mask unrolling
 
+Unrolls rows that contain multiple instances of the query word. As a result, each row in the metadata file only contains one instance of the special [MASK] token.
 
+
+
+```bash
+cd step_5_mask_unrolling/
+sbatch launch.sh
+```
 
 ---
 
 ## Step 6 — BERT Masked Word Prediction
 
-Runs BERT-based masked word predictions over the dataset, using 3 different models.
+Runs masked word prediction over the dataset, using 3 different BERT models.
 
-**To run via launcher:**
 ```bash
-bash bert_masked_word_prediction/launch.sh
+#Recreate conda env if needed (and replace <your-name>)
+#conda env create -f env.yml --prefix /gpfs/scratch/bsc100/<your-name>/.conda/envs/bert-masked-word-prediction-env
+cd step_6_bert_masked_word_prediction/
+sbatch launch.sh
 ```
 
 
----
 
-## Repository Structure (relevant branches)
-
-```
-data-processing-code/
-├── main
-│   └── preprocess_and_metadata_extraction/
-│       └── preprocess_blmicrosoft.py              # Step 1
-│
-├── tm_30_data_filtering
-│   └── data_filtering/
-│       ├── filter_blmicrosoft.py                   # Step 2
-│       └── launch_filter_blmicrosoft.sh
-│
-├── tm31_deduplication_blmicrosoft
-│   └── preprocess_and_metadata_extraction/
-│       └── deduplicate_blmicrosoft.py              # Step 3
-│
-├── tm62_llm_genre_classifier
-│   └── llm_genre_classifier_blmicrosoft/
-│       ├── genre_classifier.py                     # Step 4
-│       └── launch_genre_classifier.sh
-│
-└── tm63_bert_masked_word_prediction
-    └── bert_masked_word_prediction/
-        ├── run_predictions.py                      # Step 5
-        └── launch.sh
-```
 

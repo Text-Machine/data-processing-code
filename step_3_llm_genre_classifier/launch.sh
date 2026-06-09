@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=80
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:20:00
+#SBATCH --time=00:14:00
 #SBATCH --account=bsc100
 ##SBATCH --qos=acc_bsccssh
 #SBATCH --qos=acc_debug
@@ -15,6 +15,8 @@
 # ---------------------------------------------------------------------------
 LOG_DIR="$SLURM_SUBMIT_DIR/logs"
 mkdir -p "$LOG_DIR"
+
+#Update the HF_HOME and ENV_PATH accordingly
 export HF_HOME=/gpfs/scratch/bsc100/paolo/.cache/huggingface
 ENV_PATH="/gpfs/scratch/bsc100/paolo/.conda/envs/llm-genre-classification-env"
 # ---------------------------------------------------------------------------
@@ -29,7 +31,7 @@ MODEL="gemma-4-31b"   # shorthand: llama-8b | gemma-4-31b
 # Set to your CSV filename within INPUT_DIR, or leave empty to run on built-in test data
 INPUT_CSV_FILE="metadata_blmicrosoft_deduplicated.csv"
 INPUT_CSV="$INPUT_DIR/$INPUT_CSV_FILE"
-OUTPUT_CSV="$OUTPUT_DIR/metadata_blmicrosoft_deduplicated_genre_classified.csv"
+OUTPUT_CSV="$OUTPUT_DIR/metadata_blmicrosoft_step_3.csv"
 MODE="zeroshot"        # zeroshot | fewshot
 BATCH_SIZE=20
 SLICE_START=0
