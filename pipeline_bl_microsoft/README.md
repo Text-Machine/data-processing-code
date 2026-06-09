@@ -17,7 +17,7 @@ Every script file needs to be launched with the associated launcher from its res
 | 3 | `step_3_genre_classifier/genre_classifier_blmicrosoft.py`|  12 minutes (Job 41432292)|
 | 4 | `step_4_data_filtering/filter_data_blmicrosoft.py`|  17 minutes (Job 41442898)
 | 5 | `step_5_mask_unrolling/unroll_masks.py`  |   1 minute (Job 41448457)|
-| 6 | `step_6_masked_word_prediction/run_predictions.py` |   X minutes (Job 41584125) |
+| 6 | `step_6_masked_word_prediction/run_predictions.py` |   12 minutes (Job 41587813) |
 ---
 
 ## Step 1 — Preprocessing and Metadata Extraction
