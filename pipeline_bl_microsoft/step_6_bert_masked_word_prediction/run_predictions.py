@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -58,12 +59,18 @@ TOP_K = 10
 BERT_MAX_TOKENS = 512
 MAX_GPUS = 4
 
-LOG_FILE = f"bert_predictions_batch64_{RUN_TIMESTAMP}.log"
+LOG_FILE          = f"bert_predictions_batch64_{RUN_TIMESTAMP}.log"
+UNPROCESSABLE_LOG = f"bert_predictions_batch64_{RUN_TIMESTAMP}_unprocessable.jsonl"
 
 
 # -------------------------------------------------------------------
 # Shared logging via a queue
 # -------------------------------------------------------------------
+
+# Sentinel types sent over log_queue
+_LOG_RECORD    = "log"       # a logging.LogRecord
+_UNPROCESSABLE = "unproc"    # a dict row to append to the unprocessable log
+
 
 def make_queue_logger(name: str, log_queue: mp.Queue) -> logging.Logger:
     """Logger for worker processes: sends records to the shared queue."""
@@ -75,13 +82,36 @@ def make_queue_logger(name: str, log_queue: mp.Queue) -> logging.Logger:
     return logger
 
 
-def start_log_listener(log_queue: mp.Queue, log_file: str) -> mp.Process:
+def send_unprocessable(log_queue: mp.Queue, reason: str, row: dict, extra: dict | None = None):
     """
-    Listener process: drains the queue and writes to file + stderr.
-    Returns the started Process; caller must .join() it after workers finish.
+    Send an unprocessable-row record to the listener via the shared queue.
+    `reason` is one of: "skip_mask_lost" | "no_mask_in_encoded" | "mask_lost_other_tokenizer"
     """
-    def _listen(q, lf):
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    payload = {
+        "reason":          reason,
+        "record_id":       row.get("record_id", ""),
+        "query":           row.get("query", ""),
+        "sentence":        row.get("sentence", ""),
+        "masked_sentence": row.get("masked_sentence", ""),
+        "pg":              row.get("pg", ""),
+        **(extra or {}),
+    }
+    log_queue.put((_UNPROCESSABLE, payload))
+
+
+def start_log_listener(
+    log_queue: mp.Queue,
+    log_file: str,
+    unprocessable_file: str,
+) -> mp.Process:
+    """
+    Listener process: drains the queue.
+    - logging.LogRecord  → written to log_file + stderr
+    - (_UNPROCESSABLE, dict) → appended to unprocessable_file as JSONL
+    Returns the started Process; caller must .join() after workers finish.
+    """
+    def _listen(q, lf, uf):
+        fmt  = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
         root = logging.getLogger("listener")
         root.setLevel(logging.INFO)
         fh = logging.FileHandler(lf)
@@ -91,17 +121,25 @@ def start_log_listener(log_queue: mp.Queue, log_file: str) -> mp.Process:
         root.addHandler(fh)
         root.addHandler(sh)
 
-        while True:
-            try:
-                record = q.get()
-                if record is None:       # sentinel
-                    break
-                root.handle(record)
-            except Exception:
-                import traceback
-                traceback.print_exc()
+        unproc_fh = open(uf, "w", encoding="utf-8")
 
-    p = mp.Process(target=_listen, args=(log_queue, log_file), daemon=False)
+        try:
+            while True:
+                item = q.get()
+                if item is None:          # shutdown sentinel
+                    break
+                if isinstance(item, logging.LogRecord):
+                    root.handle(item)
+                elif isinstance(item, tuple) and item[0] == _UNPROCESSABLE:
+                    unproc_fh.write(json.dumps(item[1], ensure_ascii=False) + "\n")
+                    unproc_fh.flush()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        finally:
+            unproc_fh.close()
+
+    p = mp.Process(target=_listen, args=(log_queue, log_file, unprocessable_file), daemon=False)
     p.start()
     return p
 
@@ -159,10 +197,17 @@ def is_file_complete(input_path: Path, output_path: Path) -> bool:
 
 
 def row_matches_filter(row: dict) -> bool:
-    masked_sentence  = row.get("masked_sentence") or ""
+    """
+    Returns True if at least one [MASK] token in masked_sentence corresponds
+    to a FILTER_WORD in the original sentence.
+
+    Uses `"[MASK]" in masked` (substring check) so that tokens like "[MASK],"
+    and "[MASK]." are correctly matched rather than silently dropped.
+    """
+    masked_sentence   = row.get("masked_sentence") or ""
     original_sentence = row.get("sentence") or ""
     for orig, masked in zip(original_sentence.split(), masked_sentence.split()):
-        if masked == "[MASK]":
+        if "[MASK]" in masked:
             if orig.strip(".,;:!?\"'()-").lower() in FILTER_WORDS:
                 return True
     return False
@@ -174,29 +219,30 @@ def row_matches_filter(row: dict) -> bool:
 
 @dataclass
 class PrepareResult:
-    text: str | None
-    input_ids: list[int] | None
+    input_ids: Optional[list[int]]   # None when outcome is a skip
     outcome: str      # "ok_full" | "ok_truncated" | "skip_no_mask" | "skip_mask_lost"
-    token_count: int  # token count of the text actually sent (0 if skipped)
+    token_count: int  # token count of the ids actually used (0 if skipped)
 
 
 def prepare_text(row: dict, tokenizer, log: logging.Logger) -> PrepareResult:
     """
-    Tokenise the context, apply truncation rules at the *token* level,
-    then decode back to a string that is guaranteed <=512 tokens.
+    Tokenise the context and apply truncation rules at the *token* level,
+    using THIS tokenizer's own vocabulary.
 
     Rules:
       1. full_context = prev + masked + next
-         - if <=512 tokens  →  use as-is  (outcome: ok_full)
+         - if <=512 tokens  →  use as-is               (outcome: ok_full)
          - if  >512 tokens  →  drop prev, try masked + next  (log warning)
       2. reduced = masked + next, hard-truncated to 512 tokens
-         - if [MASK] id still present  →  decode and use  (outcome: ok_truncated)
-         - if [MASK] id gone           →  drop row        (outcome: skip_mask_lost)
+         - if [MASK] id still present  →  use           (outcome: ok_truncated)
+         - if [MASK] id gone           →  drop row      (outcome: skip_mask_lost)
 
-    The returned text is decoded from token ids so that what hits the
-    tokenizer during inference is as close as possible to what we measured.
-    Inference re-tokenizes with truncation=True / max_length=512 as a
-    hard safety net (see worker).
+    IMPORTANT: token counts are vocabulary-specific. The same text can fit
+    under 512 tokens for one tokenizer and overflow for another (e.g. rare
+    archaic words fragment very differently across vocabularies). This
+    function must therefore be called separately, with the matching
+    tokenizer, for every model that will consume its output — it must never
+    be called once and its result reused across different tokenizers.
     """
     article_id      = row.get("article_id", "<unknown>")
     prev_sentence   = row.get("prev_sentence")   or ""
@@ -204,12 +250,10 @@ def prepare_text(row: dict, tokenizer, log: logging.Logger) -> PrepareResult:
     next_sentence   = row.get("next_sentence")   or ""
 
     if "[MASK]" not in masked_sentence:
-        return PrepareResult(text=None, input_ids=None,
-                             outcome="skip_no_mask", token_count=0)
+        return PrepareResult(input_ids=None, outcome="skip_no_mask", token_count=0)
 
     mask_id = tokenizer.mask_token_id
 
-    # --- helper: tokenise with special tokens, return input_ids as list ---
     def encode(text: str) -> list[int]:
         return tokenizer(
             text,
@@ -224,9 +268,7 @@ def prepare_text(row: dict, tokenizer, log: logging.Logger) -> PrepareResult:
     full_ids  = encode(full_text)
 
     if len(full_ids) <= BERT_MAX_TOKENS:
-        decoded = tokenizer.decode(full_ids, skip_special_tokens=False)
-        return PrepareResult(text=decoded, input_ids=full_ids,
-                             outcome="ok_full", token_count=len(full_ids))
+        return PrepareResult(input_ids=full_ids, outcome="ok_full", token_count=len(full_ids))
 
     # --- Rule 2: drop prev_sentence, hard-truncate masked + next ---
     log.warning(
@@ -234,9 +276,9 @@ def prepare_text(row: dict, tokenizer, log: logging.Logger) -> PrepareResult:
         f"article_id={article_id} | tokens={len(full_ids)} | threshold={BERT_MAX_TOKENS}"
     )
 
-    reduced_text = " ".join(filter(None, [masked_sentence, next_sentence])).strip()
-    reduced_ids  = encode(reduced_text)
-    truncated_ids = reduced_ids[:BERT_MAX_TOKENS]   # hard truncation at token level
+    reduced_text  = " ".join(filter(None, [masked_sentence, next_sentence])).strip()
+    reduced_ids   = encode(reduced_text)
+    truncated_ids = reduced_ids[:BERT_MAX_TOKENS]
 
     if mask_id not in truncated_ids:
         log.warning(
@@ -244,12 +286,41 @@ def prepare_text(row: dict, tokenizer, log: logging.Logger) -> PrepareResult:
             f"article_id={article_id} | "
             f"reduced_tokens={len(reduced_ids)} | truncated_to={len(truncated_ids)}"
         )
-        return PrepareResult(text=None, input_ids=None,
-                             outcome="skip_mask_lost", token_count=0)
+        return PrepareResult(input_ids=None, outcome="skip_mask_lost", token_count=0)
 
-    decoded = tokenizer.decode(truncated_ids, skip_special_tokens=False)
-    return PrepareResult(text=decoded, input_ids=truncated_ids,
-                         outcome="ok_truncated", token_count=len(truncated_ids))
+    return PrepareResult(
+        input_ids=truncated_ids,
+        outcome="ok_truncated",
+        token_count=len(truncated_ids),
+    )
+
+
+# -------------------------------------------------------------------
+# Batch builder — pads pre-computed input_ids directly into tensors
+# -------------------------------------------------------------------
+
+def build_batch_tensors(
+    batch_ids: list[list[int]],
+    pad_token_id: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """
+    Pad a list of input_id sequences to the same length and return the
+    attention-mask dict ready for model(**batch).
+    """
+    max_len = max(len(ids) for ids in batch_ids)
+
+    padded   = []
+    att_mask = []
+    for ids in batch_ids:
+        pad_len = max_len - len(ids)
+        padded.append(ids + [pad_token_id] * pad_len)
+        att_mask.append([1] * len(ids) + [0] * pad_len)
+
+    return {
+        "input_ids":      torch.tensor(padded,   dtype=torch.long, device=device),
+        "attention_mask": torch.tensor(att_mask, dtype=torch.long, device=device),
+    }
 
 
 # -------------------------------------------------------------------
@@ -264,9 +335,6 @@ def worker(gpu_idx: int, file_queue: mp.Queue, result_queue: mp.Queue, log_queue
 
     log.info(f"Worker started | device={label} | pid={os.getpid()}")
 
-    # Load models and tokenizers directly — no pipeline in inference path.
-    # This avoids the double-tokenization bug where pipeline re-tokenizes
-    # decoded strings, producing 513/514-token sequences from <=512-token inputs.
     models     = {}
     tokenizers = {}
 
@@ -301,18 +369,21 @@ def worker(gpu_idx: int, file_queue: mp.Queue, result_queue: mp.Queue, log_queue
             result_queue.put({"skipped": True, "filepath": str(filepath)})
             continue
 
-        valid_rows  = []
-        valid_texts = []
+        valid_rows: list[dict]       = []
+        valid_ids:  list[list[int]]  = []   # pre-computed input_ids, one per row (ref tokenizer)
 
         # per-file counters
-        n_no_mask   = 0
-        n_too_long  = 0   # dropped prev
-        n_mask_lost = 0   # [MASK] truncated away
-        n_ok_full   = 0
-        n_ok_trunc  = 0
+        n_no_mask        = 0
+        n_mask_lost      = 0
+        n_ok_full        = 0
+        n_ok_trunc       = 0
+        n_too_long       = 0    # rows where prev_sentence was dropped (subset of ok_trunc)
+        n_filter_dropped = 0
+
+        dropped_rows: list[tuple[int, dict]] = []
 
         with open(filepath, "r", encoding="utf-8") as fin:
-            for line in fin:
+            for line_num, line in enumerate(fin, 1):
                 line = line.strip()
                 if not line:
                     continue
@@ -322,6 +393,8 @@ def worker(gpu_idx: int, file_queue: mp.Queue, result_queue: mp.Queue, log_queue
                     continue
 
                 if not row_matches_filter(row):
+                    n_filter_dropped += 1
+                    dropped_rows.append((line_num, row))
                     continue
 
                 result = prepare_text(row, ref_tokenizer, log)
@@ -329,22 +402,46 @@ def worker(gpu_idx: int, file_queue: mp.Queue, result_queue: mp.Queue, log_queue
                 if result.outcome == "skip_no_mask":
                     n_no_mask += 1
                     continue
+
                 if result.outcome == "skip_mask_lost":
                     n_mask_lost += 1
+                    # send to unprocessable log
+                    send_unprocessable(log_queue, "skip_mask_lost", row, {
+                        "source_file": filepath.name,
+                        "line_num":    line_num,
+                    })
                     continue
+
                 if result.outcome == "ok_truncated":
-                    n_too_long += 1   # prev was dropped
                     n_ok_trunc += 1
+                    n_too_long += 1
                 if result.outcome == "ok_full":
                     n_ok_full += 1
 
                 valid_rows.append(row)
-                valid_texts.append(result.text)
+                valid_ids.append(result.input_ids)
+
+        # write filter-dropped sidecar
+        if dropped_rows:
+            dropped_path = output_dir / (filepath.stem + "_dropped_by_filter.jsonl")
+            with open(dropped_path, "w", encoding="utf-8") as fdr:
+                for line_num, row in dropped_rows:
+                    fdr.write(json.dumps({
+                        "line_num":        line_num,
+                        "record_id":       row.get("record_id", ""),
+                        "query":           row.get("query", ""),
+                        "sentence":        row.get("sentence", ""),
+                        "masked_sentence": row.get("masked_sentence", ""),
+                    }, ensure_ascii=False) + "\n")
+            log.warning(
+                f"Filter-dropped rows → {dropped_path.name} ({len(dropped_rows)} rows)"
+            )
 
         log.info(
             f"File parsed | device={label} | file={filepath.name} | "
             f"ok_full={n_ok_full} | ok_truncated={n_ok_trunc} | "
-            f"skipped_no_mask={n_no_mask} | skipped_mask_lost={n_mask_lost}"
+            f"skipped_no_mask={n_no_mask} | skipped_mask_lost={n_mask_lost} | "
+            f"filter_dropped={n_filter_dropped}"
         )
 
         if not valid_rows:
@@ -361,40 +458,95 @@ def worker(gpu_idx: int, file_queue: mp.Queue, result_queue: mp.Queue, log_queue
             f"Running inference | device={label} | file={filepath.name} | rows={len(valid_rows)}"
         )
 
-        predictions = {}
+        predictions: dict[str, list] = {}
 
         for col_name, mdl in models.items():
             tokenizer = tokenizers[col_name]
             col_preds = []
 
-            for batch_start in range(0, len(valid_texts), BATCH_SIZE):
-                batch_texts = valid_texts[batch_start : batch_start + BATCH_SIZE]
+            # Re-encode with this model's tokenizer when it differs from the
+            # reference tokenizer used to build valid_rows/valid_ids, otherwise
+            # reuse the already-computed ids.
+            same_vocab = (tokenizer is ref_tokenizer)
 
-                encoded = tokenizer(
-                    batch_texts,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=BERT_MAX_TOKENS,
-                ).to(device)
+            for batch_start in range(0, len(valid_rows), BATCH_SIZE):
+                batch_rows = valid_rows[batch_start : batch_start + BATCH_SIZE]
+                batch_ref_ids = valid_ids[batch_start : batch_start + BATCH_SIZE]
+
+                # keep_idx[k] = position within batch_rows that batch_ids[k]
+                # corresponds to. Needed because, for a differing tokenizer,
+                # some rows may need to be skipped (mask doesn't survive
+                # truncation under THIS vocabulary) without shifting the
+                # alignment of the rows that do succeed.
+                if same_vocab:
+                    batch_ids = batch_ref_ids
+                    keep_idx  = list(range(len(batch_rows)))
+                else:
+                    # Token counts are vocabulary-specific: the same text can
+                    # fit under 512 tokens for the reference tokenizer and
+                    # overflow for this one (or vice versa). Re-run the same
+                    # vetted prepare_text() logic — which drops prev_sentence
+                    # and verifies the mask survives truncation — using THIS
+                    # tokenizer, instead of a naive truncate-and-hope.
+                    batch_ids = []
+                    keep_idx  = []
+                    for ridx, row in enumerate(batch_rows):
+                        result = prepare_text(row, tokenizer, log)
+                        if result.input_ids is None:
+                            log.warning(
+                                f"Mask lost for this tokenizer's vocab | "
+                                f"col={col_name} | batch_row={ridx} | file={filepath.name}"
+                            )
+                            send_unprocessable(log_queue, "mask_lost_other_tokenizer", row, {
+                                "col":         col_name,
+                                "source_file": filepath.name,
+                                "batch_start": batch_start,
+                                "batch_row":   ridx,
+                            })
+                            continue
+                        batch_ids.append(result.input_ids)
+                        keep_idx.append(ridx)
+
+                # batch_preds defaults to [] for any row skipped above; rows
+                # that succeed get overwritten with real predictions below.
+                batch_preds = [[] for _ in batch_rows]
+
+                if not batch_ids:
+                    col_preds.extend(batch_preds)
+                    continue
+
+                # Pad pre-computed ids into tensors — no string re-encoding
+                encoded = build_batch_tensors(
+                    batch_ids,
+                    pad_token_id=tokenizer.pad_token_id,
+                    device=device,
+                )
 
                 with torch.no_grad():
                     outputs = mdl(**encoded)
 
-                input_ids = encoded["input_ids"]
+                input_ids_tensor = encoded["input_ids"]
 
-                for j in range(input_ids.shape[0]):
+                for j in range(input_ids_tensor.shape[0]):
                     mask_positions = (
-                        input_ids[j] == tokenizer.mask_token_id
+                        input_ids_tensor[j] == tokenizer.mask_token_id
                     ).nonzero(as_tuple=True)[0]
 
                     if len(mask_positions) == 0:
+                        # Should not happen now that prepare_text() already
+                        # verified the mask survives for this tokenizer, but
+                        # guard and log to the unprocessable file just in case.
+                        row = batch_rows[keep_idx[j]]
                         log.warning(
-                            f"No [MASK] token found in encoded input | "
-                            f"col={col_name} | batch_row={j} | "
-                            f"file={filepath.name}"
+                            f"No [MASK] token found in encoded input (unexpected) | "
+                            f"col={col_name} | batch_row={j} | file={filepath.name}"
                         )
-                        col_preds.append([])
+                        send_unprocessable(log_queue, "no_mask_in_encoded", row, {
+                            "col":         col_name,
+                            "source_file": filepath.name,
+                            "batch_start": batch_start,
+                            "batch_row":   j,
+                        })
                         continue
 
                     mask_pos = mask_positions[0].item()
@@ -402,12 +554,14 @@ def worker(gpu_idx: int, file_queue: mp.Queue, result_queue: mp.Queue, log_queue
                     probs    = torch.softmax(logits, dim=-1)
                     top      = torch.topk(probs, TOP_K)
 
-                    col_preds.append([
+                    batch_preds[keep_idx[j]] = [
                         (tokenizer.decode([tok_id]).strip(), round(score, 4))
                         for tok_id, score in zip(
                             top.indices.tolist(), top.values.tolist()
                         )
-                    ])
+                    ]
+
+                col_preds.extend(batch_preds)
 
             predictions[col_name] = col_preds
 
@@ -437,30 +591,28 @@ def main():
     log = make_main_logger(LOG_FILE)
 
     log.info("=" * 80)
-    log.info(f"Run started:  {RUN_TIMESTAMP}")
-    log.info(f"Input dir:    {INPUT_DIR}")
-    log.info(f"Input glob:   {INPUT_GLOB}")
-    log.info(f"Output dir:   {OUTPUT_DIR}")
-    log.info(f"Log file:     {LOG_FILE}")
+    log.info(f"Run started:       {RUN_TIMESTAMP}")
+    log.info(f"Input dir:         {INPUT_DIR}")
+    log.info(f"Input glob:        {INPUT_GLOB}")
+    log.info(f"Output dir:        {OUTPUT_DIR}")
+    log.info(f"Log file:          {LOG_FILE}")
+    log.info(f"Unprocessable log: {UNPROCESSABLE_LOG}")
 
     n_gpus = min(torch.cuda.device_count(), MAX_GPUS) or 1
-    log.info(f"GPUs to use:  {n_gpus}")
+    log.info(f"GPUs to use:       {n_gpus}")
 
     input_path  = Path(INPUT_DIR)
     output_path = Path(OUTPUT_DIR)
 
-    # Path.glob supports brace expansion only in Python 3.12+;
-    # use explicit word list as fallback for Python 3.11 and earlier.
     matched = sorted(input_path.glob(INPUT_GLOB))
     if not matched:
         words = ["machine", "machines", "slave", "slaves"]
         matched = sorted(
             fp
             for word in words
-            for fp in input_path.glob(f"bl_microsoft_{word}_step_5.jsonl")
+            for fp in input_path.glob(f"bl_microsoft_{word}_spacy_step_5.jsonl")
         )
 
-    # Skip zero-byte files (e.g. night / morning placeholders)
     all_files = [
         (str(fp), str(output_path))
         for fp in matched
@@ -477,8 +629,7 @@ def main():
     file_queue   = ctx.Queue()
     result_queue = ctx.Queue()
 
-    # Start the log listener before workers
-    log_listener = start_log_listener(log_queue, LOG_FILE)
+    log_listener = start_log_listener(log_queue, LOG_FILE, UNPROCESSABLE_LOG)
 
     for f in all_files:
         file_queue.put(f)
@@ -497,7 +648,6 @@ def main():
     for p in workers:
         p.join()
 
-    # Shut down log listener
     log_queue.put(None)
     log_listener.join()
 

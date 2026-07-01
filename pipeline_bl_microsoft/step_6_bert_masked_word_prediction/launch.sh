@@ -2,7 +2,7 @@
 #SBATCH --job-name=bert_preds_b64
 #SBATCH --output=logs/bert_preds_b64_%j.log
 #SBATCH --error=logs/bert_preds_b64_%j.err
-#SBATCH --time=00:25:00
+#SBATCH --time=00:20:00
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=80
@@ -19,12 +19,14 @@ mkdir -p logs
 export BERT_MODELS_BASE="/gpfs/projects/bsc100/models/bert_textmachine"
 
 export BERT_INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata"
-export BERT_INPUT_GLOB="bl_microsoft_{machine,machines,slave,slaves}_step_5.jsonl"
+#export BERT_INPUT_GLOB="bl_microsoft_*_spacy_step_5.jsonl"
 
 export BERT_OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata"
+
+
+mkdir -p "$BERT_OUTPUT_DIR"
 # ---------------------------------------------------------------
 
-#Update the HF_HOME and ENV_PATH accordingly
 export HF_HOME=/gpfs/scratch/bsc100/paolo/.cache/huggingface
 ENV_PATH="/gpfs/scratch/bsc100/paolo/.conda/envs/textmachine-llm-v2"
 source "$(conda info --base)/etc/profile.d/conda.sh"
