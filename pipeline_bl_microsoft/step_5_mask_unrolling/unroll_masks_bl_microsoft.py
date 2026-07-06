@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Unroll Multi-Mask Rows — Pre-processing Step
 =============================================
@@ -38,13 +39,17 @@ Output fields added / updated per unrolled row:
 
 Usage:
   python3 unroll_masks.py --input-dir <path> --output-dir <path>
+  python3 unroll_masks.py --input-dir <path> --output-dir <path> --pattern "*_spacy*"
+  python3 unroll_masks.py --input-dir <path> --output-dir <path> --pattern "*_regex*"
 """
 
 import argparse
+import fnmatch
 import json
 import logging
 import sys
 from pathlib import Path
+import re
 
 
 # -------------------------------------------------------------------
@@ -261,6 +266,27 @@ def is_file_complete(input_path: Path, output_path: Path) -> bool:
     return expected == actual
 
 
+def make_output_name(filepath: Path) -> str:
+    """
+    Convert
+
+        bl_microsoft_step_4_slaves_spacy.jsonl
+
+    into
+
+        bl_microsoft_slaves_spacy_step_5.jsonl
+    """
+
+    stem = filepath.stem
+
+    # Remove any existing step tag
+    stem = re.sub(r"_step_\d+", "", stem)
+
+    # Append the new processing stage
+    stem = f"{stem}_step_5"
+
+    return stem + filepath.suffix
+
 def process_file(filepath: Path, output_dir: Path, suffix: str = ""):
     """
     Read one .jsonl file, filter and unroll, write to output_dir.
@@ -268,7 +294,7 @@ def process_file(filepath: Path, output_dir: Path, suffix: str = ""):
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = output_dir / f"{filepath.stem}{suffix}{filepath.suffix}"
+    out_path = output_dir / make_output_name(filepath)
 
     if is_file_complete(filepath, out_path):
         log.info(f"  Skipping (already complete): {out_path}")
@@ -341,6 +367,15 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Suffix to append to each output filename stem (e.g. '_step_5').",
     )
+    parser.add_argument(
+        "--pattern",
+        default="*.jsonl",
+        help=(
+            "Glob pattern to select input files within --input-dir "
+            "(default: '*.jsonl'). "
+            "Examples: '*_spacy*.jsonl', '*_regex*.jsonl', 'step_4_night_*.jsonl'."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -358,21 +393,32 @@ def main():
     log.info(f"Filter words: {sorted(FILTER_WORDS)}")
     log.info(f"Input dir:    {input_path}")
     log.info(f"Output dir:   {output_dir}")
+    log.info(f"File pattern: {args.pattern}")
 
     if not input_path.exists():
         log.error(f"Input directory does not exist: {input_path}")
         sys.exit(1)
 
-    jsonl_files = sorted(input_path.glob("*.jsonl"))
+    # Glob with the user-supplied pattern; fall back to *.jsonl default
+    all_jsonl = sorted(input_path.glob("*.jsonl"))
+    jsonl_files = [
+        f for f in all_jsonl
+        if fnmatch.fnmatch(f.name, args.pattern)
+    ] if args.pattern != "*.jsonl" else all_jsonl
 
     if not jsonl_files:
-        log.warning(f"No .jsonl files found in: {input_path}")
+        log.warning(
+            f"No files matching '{args.pattern}' found in: {input_path}"
+        )
         sys.exit(0)
 
-    log.info(f"Found {len(jsonl_files)} .jsonl file(s) to process.")
+    log.info(f"Found {len(jsonl_files)} file(s) matching '{args.pattern}':")
+    for f in jsonl_files:
+        log.info(f"  {f.name}")
 
     for filepath in jsonl_files:
-        process_file(filepath, output_dir, args.suffix)
+        process_file(filepath, output_dir, args.pattern)
+        #process_file(filepath, output_dir, args.suffix)
 
     log.info("\nAll done.")
 

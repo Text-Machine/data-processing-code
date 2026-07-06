@@ -1,6 +1,18 @@
 """
 BERT Masked Word Prediction Script (multi-GPU, batch_size=64)
 =====================================================================
+
+File selection
+--------------
+Input files are selected explicitly by query word rather than by a
+directory-wide glob:
+
+    {BERT_INPUT_DIR}/bl_microsoft_{word}_{BERT_SUFFIX}_step_5.jsonl
+
+BERT_QUERY_WORDS (comma-separated) drives both FILTER_WORDS and which
+step-5 files get opened. This means a run for a NEW word never opens,
+checks, or reprocesses files belonging to words processed in earlier
+runs — BERT_QUERY_WORDS only needs to list the word(s) for THIS run.
 """
 
 import json
@@ -26,7 +38,7 @@ from transformers import AutoModelForMaskedLM, AutoTokenizer
 BATCH_SIZE = 64
 
 # -------------------------------------------------------------------
-# Config  (all paths overridable via environment variables)
+# Config  (all paths/words overridable via environment variables)
 # -------------------------------------------------------------------
 
 MODELS_BASE = os.environ.get(
@@ -44,16 +56,23 @@ INPUT_DIR = os.environ.get(
     "BERT_INPUT_DIR",
     "/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata",
 )
-INPUT_GLOB = os.environ.get(
-    "BERT_INPUT_GLOB",
-    "bl_microsoft_{machine,machines,slave,slaves}_step_5.jsonl",
-)
 OUTPUT_DIR = os.environ.get(
     "BERT_OUTPUT_DIR",
     "/gpfs/projects/bsc100/textmachine-data/filtered_data_predictions_batch64",
 )
 
-FILTER_WORDS = {"machine", "machines", "slave", "slaves"}
+# Sentence-splitting suffix used by step 4/5 filenames (spacy or regex).
+SUFFIX = os.environ.get("BERT_SUFFIX", "spacy")
+
+# Query words for THIS run — comma-separated, e.g. "machine,machines,slave,slaves"
+QUERY_WORDS = [
+    w.strip().lower()
+    for w in os.environ.get(
+        "BERT_QUERY_WORDS", "machine,machines,slave,slaves"
+    ).split(",")
+    if w.strip()
+]
+FILTER_WORDS = set(QUERY_WORDS)
 
 TOP_K = 10
 BERT_MAX_TOKENS = 512
@@ -199,7 +218,7 @@ def is_file_complete(input_path: Path, output_path: Path) -> bool:
 def row_matches_filter(row: dict) -> bool:
     """
     Returns True if at least one [MASK] token in masked_sentence corresponds
-    to a FILTER_WORD in the original sentence.
+    to a word in FILTER_WORDS in the original sentence.
 
     Uses `"[MASK]" in masked` (substring check) so that tokens like "[MASK],"
     and "[MASK]." are correctly matched rather than silently dropped.
@@ -361,7 +380,8 @@ def worker(gpu_idx: int, file_queue: mp.Queue, result_queue: mp.Queue, log_queue
         log.info(f"Starting file | device={label} | file={filepath.name} | path={filepath}")
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        out_name = filepath.stem.replace("_step_5", "") + "_step_6" + filepath.suffix
+        query = filepath.stem.split("_")[2]
+        out_name = f"blmicrosoft_final_{query}{filepath.suffix}"
         out_path = output_dir / out_name
 
         if is_file_complete(filepath, out_path):
@@ -593,8 +613,10 @@ def main():
     log.info("=" * 80)
     log.info(f"Run started:       {RUN_TIMESTAMP}")
     log.info(f"Input dir:         {INPUT_DIR}")
-    log.info(f"Input glob:        {INPUT_GLOB}")
     log.info(f"Output dir:        {OUTPUT_DIR}")
+    log.info(f"Suffix:            {SUFFIX}")
+    log.info(f"Query words:       {QUERY_WORDS}")
+    log.info(f"Filter words:      {sorted(FILTER_WORDS)}")
     log.info(f"Log file:          {LOG_FILE}")
     log.info(f"Unprocessable log: {UNPROCESSABLE_LOG}")
 
@@ -604,24 +626,27 @@ def main():
     input_path  = Path(INPUT_DIR)
     output_path = Path(OUTPUT_DIR)
 
-    matched = sorted(input_path.glob(INPUT_GLOB))
-    if not matched:
-        words = ["machine", "machines", "slave", "slaves"]
-        matched = sorted(
-            fp
-            for word in words
-            for fp in input_path.glob(f"bl_microsoft_{word}_spacy_step_5.jsonl")
-        )
+    # File selection: one explicit file per query word, rather than a
+    # directory-wide glob. This guarantees a run only ever touches the
+    # step-5 files for the words listed in QUERY_WORDS — files belonging
+    # to words processed in earlier runs are never opened or reprocessed.
+    matched = []
+    for word in QUERY_WORDS:
+        fp = input_path / f"bl_microsoft_{word}_{SUFFIX}_step_5.jsonl"
+        if fp.exists() and fp.stat().st_size > 0:
+            matched.append(fp)
+        else:
+            log.warning(f"Expected step-5 file not found or empty, skipping: {fp}")
 
-    all_files = [
-        (str(fp), str(output_path))
-        for fp in matched
-        if fp.stat().st_size > 0
-    ]
+    all_files = [(str(fp), str(output_path)) for fp in matched]
 
     log.info(f"Files queued: {len(all_files)}")
     for fp, _ in all_files:
         log.info(f"  {fp}")
+
+    if not all_files:
+        log.warning("No input files found for any of the requested query words. Exiting.")
+        return
 
     ctx = mp.get_context("spawn")
 

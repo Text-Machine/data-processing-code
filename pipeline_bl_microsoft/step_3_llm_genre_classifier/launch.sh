@@ -31,7 +31,7 @@ MODEL="gemma-4-31b"   # shorthand: llama-8b | gemma-4-31b
 # Set to your CSV filename within INPUT_DIR, or leave empty to run on built-in test data
 INPUT_CSV_FILE="metadata_blmicrosoft_deduplicated.csv"
 INPUT_CSV="$INPUT_DIR/$INPUT_CSV_FILE"
-OUTPUT_CSV="$OUTPUT_DIR/metadata_blmicrosoft_step_3.csv"
+OUTPUT_CSV="$OUTPUT_DIR/blmicrosoft_final_metadata.csv"
 MODE="zeroshot"        # zeroshot | fewshot
 BATCH_SIZE=20
 SLICE_START=0

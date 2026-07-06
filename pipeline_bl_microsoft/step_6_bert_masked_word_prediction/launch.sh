@@ -12,34 +12,23 @@
 #SBATCH --exclusive
 
 mkdir -p logs
+cd "$SLURM_SUBMIT_DIR"
+source "${SLURM_SUBMIT_DIR}/../query_word_config.sh"
 
-# ---------------------------------------------------------------
-# Paths — edit here
-# ---------------------------------------------------------------
 export BERT_MODELS_BASE="/gpfs/projects/bsc100/models/bert_textmachine"
-
 export BERT_INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata"
-#export BERT_INPUT_GLOB="bl_microsoft_*_spacy_step_5.jsonl"
-
 export BERT_OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata"
-
-
+export BERT_SUFFIX="spacy"   # must match step 4/5 suffix
+export BERT_QUERY_WORDS="$(IFS=,; echo "${QUERY_WORDS[*]}")"
 mkdir -p "$BERT_OUTPUT_DIR"
-# ---------------------------------------------------------------
 
 export HF_HOME=/gpfs/scratch/bsc100/paolo/.cache/huggingface
 ENV_PATH="/gpfs/scratch/bsc100/paolo/.conda/envs/textmachine-llm-v2"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_PATH"
 
-cd "$SLURM_SUBMIT_DIR"
-
-echo "SLURM_JOB_ID        : $SLURM_JOB_ID"
-echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
-echo "BERT_MODELS_BASE    : $BERT_MODELS_BASE"
-echo "BERT_INPUT_DIR      : $BERT_INPUT_DIR"
-echo "BERT_INPUT_GLOB     : $BERT_INPUT_GLOB"
-echo "BERT_OUTPUT_DIR     : $BERT_OUTPUT_DIR"
+echo "SLURM_JOB_ID     : $SLURM_JOB_ID"
+echo "BERT_QUERY_WORDS : $BERT_QUERY_WORDS"
+echo "BERT_SUFFIX      : $BERT_SUFFIX"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
-
 python3 run_predictions.py

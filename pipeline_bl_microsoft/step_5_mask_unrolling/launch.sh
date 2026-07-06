@@ -8,21 +8,19 @@
 #SBATCH --qos=gp_debug
 #SBATCH --account=bsc100
 
-# -------------------------------------------------------------------
-# Paths — edit here if the data ever moves
-# -------------------------------------------------------------------
+cd "$SLURM_SUBMIT_DIR"
+mkdir -p logs
+
+source "${SLURM_SUBMIT_DIR}/../query_word_config.sh"
 
 INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata/"
 OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata/"
+SUFFIX="spacy"   # must match the suffix used in step 4 (spacy or regex)
 
-# -------------------------------------------------------------------
+echo "Words this run: ${QUERY_WORDS[*]}"
 
-cd $SLURM_SUBMIT_DIR
-
-mkdir -p logs
-
-
-python3 unroll_masks.py \
-    --input-dir  "$INPUT_DIR" \
-    --output-dir "$OUTPUT_DIR" \
-    --suffix     "_step_5"
+python3 unroll_masks_bl_microsoft.py \
+  --input-dir   "$INPUT_DIR" \
+  --output-dir  "$OUTPUT_DIR" \
+  --suffix      "$SUFFIX" \
+  --query-words "${QUERY_WORDS[@]}"
