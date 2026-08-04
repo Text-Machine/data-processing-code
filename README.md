@@ -22,7 +22,7 @@ Aggregates multiple historical and literary corpora from different sources. See 
 End-to-end pipeline for producing a fully processed metadata file for the BL Microsoft dataset. Must be run in the order of its numbered steps (preprocessing/metadata extraction → deduplication → LLM genre classification → data filtering → mask unrolling → BERT masked-word prediction). Requires the raw dataset to have been downloaded first, as described in `download_raw_data_code/README.md` (section *"2. BL Microsoft Collection"*). See [`pipeline_bl_microsoft/README.md`](pipeline_bl_microsoft/README.md) for full details.
 
 ### `pipeline_hmd_lwm/`
-Processing pipeline for the HMD/LWM dataset. Documentation coming soon.
+Processing pipeline for the HMD/LWM dataset. Requires the raw dataset to have been downloaded first, as described in `download_raw_data_code/README.md` (section *"3. Zenodo-hosted Datasets"*). See [`pipeline_hmd_lwm/README.md`](pipeline_hmd_lwm/README.md) for full details.
 
 ## Repository Structure & Branches
 

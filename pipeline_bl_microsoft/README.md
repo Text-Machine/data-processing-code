@@ -76,8 +76,6 @@ cd step_3_llm_genre_classifier/
 sbatch launch.sh
 ```
 
-
-
 ## Step 4 — Data Filtering with query words
 
 Filter dataset by different query words, with sentence-level output including context sentences and masked versions.
@@ -98,15 +96,11 @@ If you want to modify the query words used for sentence extraction and masked-wo
 QUERY_WORDS=(slave slaves machine machines mornings nights morning night)
 ```
 
-
-
 ---
 
 ## Step 5 — Mask unrolling
 
 Unrolls rows that contain multiple instances of the query word. As a result, each row in the metadata file only contains one instance of the special [MASK] token.
-
-
 
 ```bash
 cd step_5_mask_unrolling/
