@@ -78,22 +78,19 @@ sbatch launch.sh
 
 ## Step 4 — Data Filtering with query words
 
-Filter dataset by different query words, with sentence-level output including context sentences and masked versions.
+Specify the query words used for sentence extraction and masked-word prediction (to be used for Steps 4-6). To do this, you need to update the query word configuration used by the scripts, by modifying the following line inside `pipeline_bl_microsoft/query_word_config.sh`:
 
+```bash
+QUERY_WORDS=(slave slaves machine machines mornings nights morning night)
+```
+
+Filter dataset by different query words, with sentence-level output including context sentences and masked versions.
 
 ```bash
 #Recreate conda env if needed (and replace <your-name>)
 #conda env create -f env.yml --prefix /gpfs/scratch/bsc100/<your-name>/.conda/envs/llm-data-filtering-env
 cd step_4_data_filtering/
 sbatch launch.sh
-```
-
-## Note — Updating the Query Words
-
-If you want to modify the query words used for sentence extraction and masked-word prediction (Steps 4-6), you need to update the query word configuration used by the scripts, by modifying the following line inside `pipeline_bl_microsoft/query_word_config.sh`:
-
-```bash
-QUERY_WORDS=(slave slaves machine machines mornings nights morning night)
 ```
 
 ---
