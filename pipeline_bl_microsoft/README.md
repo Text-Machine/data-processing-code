@@ -90,6 +90,14 @@ cd step_4_data_filtering/
 sbatch launch.sh
 ```
 
+## Note — Updating the Query Words
+
+If you want to modify the query words used for sentence extraction and masked-word prediction (Steps 4-6), you need to update the query word configuration used by the scripts, by modifying the following line inside `pipeline_bl_microsoft/query_word_config.sh`:
+
+```bash
+QUERY_WORDS=(slave slaves machine machines mornings nights morning night)
+```
+
 
 
 ---
@@ -118,15 +126,6 @@ cd step_6_bert_masked_word_prediction/
 sbatch launch.sh
 ```
 
-## Note — Updating the Query Words
-
-If you want to modify the query words used for sentence extraction and masked-word prediction (Steps 4-6), the metadata generation steps (Steps 1-3) do not need to be rerun.
-
-All you need to do is to update the query word configuration used by the scripts, by modifying the following line inside `word_config.sh`:
-
-```bash
-QUERY_WORDS=(slave slaves machine machines mornings nights morning night)
-```
 
 ## Final note on execution time
 The execution times listed in the Pipeline Overview section are based on the query words `slave`, `slaves`, `machine`, `machines`, `mornings`, `nights`, `morning` and `night`. Other query words may require more or less time, but this cannot be predicted upfront. Update the time allocation of your job accordingly.
