@@ -59,7 +59,7 @@ Preprocess the ECCO XML dataset into per-book text files and a metadata CSV. Sin
 source venv/bin/activate
 python3 preprocess_ecco.py \
     --input_dir /gpfs/projects/bsc100/textmachine-data/ecco/p4/ecco_p4_released \
-    --output_dir ./output
+    --output_dir /gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_ecco
 ```
 
 ---
@@ -74,7 +74,7 @@ Preprocess the Evans (Early American Imprints, TCP) XML dataset into per-book te
 source venv/bin/activate
 python3 preprocess_evans.py \
     --input_zip /gpfs/projects/bsc100/textmachine-data/evans.zip \
-    --output_dir ./output_evans
+    --output_dir /gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_evans
 ```
 
 ---

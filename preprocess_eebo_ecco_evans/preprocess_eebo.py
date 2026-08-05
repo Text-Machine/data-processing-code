@@ -2,7 +2,7 @@
 Preprocess EEBO XML dataset into per-book text files and a metadata CSV.
 
 Usage:
-    python3 preprocess_eebo.py --input_zip /gpfs/projects/bsc100/textmachine-data/eebo_all.zip --output_dir ./output
+    python3 preprocess_eebo.py --input_zip /gpfs/projects/bsc100/textmachine-data/eebo_all.zip --output_dir ./gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_eebo
 """
 
 import csv
@@ -143,29 +143,54 @@ def process_record(xml_bytes, name):
     return metadata, text
 
 
-def process_dataset(zip_path, output_csv, output_txt_dir):
+def process_dataset(zip_paths, output_csv, output_txt_dir):
+    """
+    Process one or more (nested) zip files belonging to the same phase,
+    accumulating all metadata rows in memory and writing the metadata CSV
+    exactly once at the end, after every zip has been processed.
+
+    zip_paths: iterable of paths to phase zip files (e.g. one tmp zip per
+               inner phase zip extracted from the outer archive).
+    """
     output_txt_dir = Path(output_txt_dir)
     output_txt_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    print(f"Processing: {zip_path}")
+    seen_book_ids = set()
 
-    for xml_bytes, name in iter_xml_files_from_zip(zip_path):
-        try:
-            metadata, text = process_record(xml_bytes, name)
+    for zip_path in zip_paths:
+        print(f"Processing: {zip_path}")
 
-            book_id = metadata.get("book_id") or Path(name).stem
-            txt_path = output_txt_dir / f"{book_id}.txt"
+        for xml_bytes, name in iter_xml_files_from_zip(zip_path):
+            try:
+                metadata, text = process_record(xml_bytes, name)
 
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(text)
+                book_id = metadata.get("book_id") or Path(name).stem
 
-            metadata["path_txt"] = str(txt_path)
-            metadata["num_words"] = len(text.split())
+                # Guard against txt filename collisions across different
+                # inner zips (or malformed records without a usable ID):
+                # if we've already written this book_id, disambiguate the
+                # filename instead of silently overwriting the earlier file.
+                if book_id in seen_book_ids:
+                    safe_stem = Path(name).stem
+                    print(f"[WARN] duplicate book_id '{book_id}' encountered "
+                          f"again in {zip_path} ({name}); "
+                          f"disambiguating output filename")
+                    book_id = f"{book_id}__{safe_stem}"
+                seen_book_ids.add(book_id)
 
-            rows.append(metadata)
-        except Exception as e:
-            print(f"[ERROR] {name}: {e}")
+                txt_path = output_txt_dir / f"{book_id}.txt"
+
+                with open(txt_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+
+                #metadata["path_txt"] = str(txt_path)
+                metadata["path_txt"] = str(txt_path.relative_to(output_txt_dir.parent))
+                metadata["num_words"] = len(text.split())
+
+                rows.append(metadata)
+            except Exception as e:
+                print(f"[ERROR] {name}: {e}")
 
     write_metadata_csv(rows, output_csv)
 
@@ -207,15 +232,32 @@ def main(input_zip, output_dir):
         phase1_zips = [n for n in z.namelist() if phase1_marker in n and n.endswith(".zip")]
         phase2_zips = [n for n in z.namelist() if phase2_marker in n and n.endswith(".zip")]
 
-        for p in phase1_zips:
-            tmp_path = output_dir / "tmp_phase1.zip"
+        # Extract every inner zip for a phase to its own temp file first,
+        # then hand the FULL list to process_dataset() so metadata rows
+        # from all inner zips in the phase are accumulated together and
+        # the CSV is written exactly once (previously each inner zip
+        # overwrote the CSV from the last call, losing all prior rows).
+        phase1_tmp_paths = []
+        for i, p in enumerate(phase1_zips):
+            tmp_path = output_dir / f"tmp_phase1_{i}.zip"
             tmp_path.write_bytes(z.read(p))
-            process_dataset(tmp_path, output_dir / "phase1_metadata.csv", txt_dir / "phase1")
+            phase1_tmp_paths.append(tmp_path)
 
-        for p in phase2_zips:
-            tmp_path = output_dir / "tmp_phase2.zip"
+        if phase1_tmp_paths:
+            process_dataset(phase1_tmp_paths, output_dir / "phase1_metadata.csv", txt_dir / "phase1")
+            for tmp_path in phase1_tmp_paths:
+                tmp_path.unlink(missing_ok=True)
+
+        phase2_tmp_paths = []
+        for i, p in enumerate(phase2_zips):
+            tmp_path = output_dir / f"tmp_phase2_{i}.zip"
             tmp_path.write_bytes(z.read(p))
-            process_dataset(tmp_path, output_dir / "phase2_metadata.csv", txt_dir / "phase2")
+            phase2_tmp_paths.append(tmp_path)
+
+        if phase2_tmp_paths:
+            process_dataset(phase2_tmp_paths, output_dir / "phase2_metadata.csv", txt_dir / "phase2")
+            for tmp_path in phase2_tmp_paths:
+                tmp_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

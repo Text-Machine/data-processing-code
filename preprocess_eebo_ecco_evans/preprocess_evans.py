@@ -3,7 +3,7 @@ Preprocess Evans (Early American Imprints, TCP) XML dataset into per-book
 text files and a metadata CSV.
 
 Usage:
-    python3 preprocess_evans.py --input_zip /gpfs/projects/bsc100/textmachine-data/evans.zip --output_dir ./output_evans
+    python3 preprocess_evans.py --input_zip /gpfs/projects/bsc100/textmachine-data/evans.zip --output_dir ./gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_evans
 """
 
 import csv
@@ -13,6 +13,69 @@ import io
 import argparse
 from pathlib import Path
 from lxml import etree
+
+
+# -----------------------------
+# Language / author normalization helpers
+# (shared logic across preprocess_ecco.py / preprocess_eebo.py / preprocess_evans.py)
+# -----------------------------
+
+# TCP corpora spell out <LANGUAGE> inconsistently across records (e.g. "Eng"
+# vs "English", "Lat" vs "Latin"). This maps every variant we've seen onto a
+# single canonical spelled-out form so the main_language column is usable
+# for grouping/filtering downstream.
+LANGUAGE_MAP = {
+    "eng": "English",
+    "english": "English",
+    "lat": "Latin",
+    "latin": "Latin",
+    "fre": "French",
+    "french": "French",
+    "grc": "Greek",
+    "greek": "Greek",
+    "ger": "German",
+    "german": "German",
+    "spa": "Spanish",
+    "spanish": "Spanish",
+    "ita": "Italian",
+    "italian": "Italian",
+    "dut": "Dutch",
+    "dutch": "Dutch",
+    "wel": "Welsh",
+    "welsh": "Welsh",
+}
+
+
+def normalize_language(raw):
+    """Map a raw <LANGUAGE> value onto a single canonical spelled-out name."""
+    if not raw:
+        return ""
+    key = raw.strip().lower().rstrip(".")
+    return LANGUAGE_MAP.get(key, raw.strip())
+
+
+def extract_author_years(author):
+    """
+    Pull birth/death years out of a TCP AUTHOR string, e.g.
+    "Bunyan, John, 1628-1688." -> ("1628", "1688").
+    Falls back to isolated "b. 1650" / "d. 1700" style annotations when no
+    full range is present. Returns ("", "") if nothing usable is found.
+    """
+    if not author:
+        return "", ""
+
+    m = re.search(r"(\d{3,4})\s*-\s*(\d{3,4})", author)
+    if m:
+        return m.group(1), m.group(2)
+
+    birth, death = "", ""
+    m = re.search(r"\bb\.?\s*(\d{3,4})\b", author, re.IGNORECASE)
+    if m:
+        birth = m.group(1)
+    m = re.search(r"\bd\.?\s*(\d{3,4})\b", author, re.IGNORECASE)
+    if m:
+        death = m.group(1)
+    return birth, death
 
 
 # -----------------------------
@@ -38,8 +101,9 @@ def extract_metadata(root, path):
     author = find(".//TITLESTMT/AUTHOR")
     place = find(".//PUBLICATIONSTMT/PUBPLACE")
     publisher = find(".//PUBLICATIONSTMT/PUBLISHER")
-    date = find(".//PUBLICATIONSTMT/DATE")
-    language = find(".//LANGUAGE")
+    edition_date = find(".//PUBLICATIONSTMT/DATE")
+    main_language = normalize_language(find(".//LANGUAGE"))
+    birth_year, death_year = extract_author_years(author)
 
     # Build id_map as TYPE -> list of values, not TYPE -> single value.
     # Evans records commonly have *two* <IDNO TYPE="stc"> entries (an Evans
@@ -80,10 +144,12 @@ def extract_metadata(root, path):
         "book_id": book_id,
         "title": title,
         "author": author,
-        "date": date,
+        "birth_year": birth_year,
+        "death_year": death_year,
+        "edition_date": edition_date,
         "place": place,
         "publisher": publisher,
-        "language": language,
+        "main_language": main_language,
         "number_of_pages": pages,
         "all_ids": all_ids,
         "path_xml": str(path),
@@ -190,7 +256,9 @@ def process_zip_part(zip_path, output_txt_dir):
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(text)
 
-            metadata["path_txt"] = str(txt_path)
+            #metadata["path_txt"] = str(txt_path)
+            
+            metadata["path_txt"] = str(txt_path.relative_to(output_txt_dir.parent))
             metadata["num_words"] = len(text.split())
 
             rows.append(metadata)
@@ -206,9 +274,9 @@ def write_metadata_csv(rows, output_csv):
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
-        "record_id", "book_id", "title", "author", "date", "place",
-        "publisher", "language", "number_of_pages", "num_words",
-        "all_ids", "path_xml", "path_txt",
+        "record_id", "book_id", "title", "author", "birth_year", "death_year",
+        "edition_date", "place", "publisher", "main_language",
+        "number_of_pages", "num_words", "all_ids", "path_xml", "path_txt",
     ]
 
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
@@ -230,7 +298,6 @@ def main(input_zip, output_dir):
 
     with zipfile.ZipFile(input_zip, "r") as z:
         partition_zips = sorted(
-            #n for n in z.namelist() if partition_marker in n and n.endswith(".zip")
             n for n in z.namelist() if partition_marker in n and re.search(r"\d+\.zip$", n)
         )
 
