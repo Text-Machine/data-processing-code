@@ -3,7 +3,7 @@ Preprocess Evans (Early American Imprints, TCP) XML dataset into per-book
 text files and a metadata CSV.
 
 Usage:
-    python3 preprocess_evans.py --input_zip /gpfs/projects/bsc100/textmachine-data/evans.zip --output_dir ./gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_evans
+    python3 preprocess_evans.py --input_zip /gpfs/projects/bsc100/textmachine-data/evans.zip --output_dir /gpfs/projects/bsc100/textmachine-data/preprocessed_data/output_evans
 """
 
 import csv
@@ -44,6 +44,48 @@ LANGUAGE_MAP = {
     "wel": "Welsh",
     "welsh": "Welsh",
 }
+
+
+def parse_page_count(extent):
+    """
+    Extract a representative page count from a TCP bibliographic EXTENT
+    string. These are free-text and inconsistent, e.g.:
+      "16 p."              -> 16
+      "[4], 147, [1] p."   -> 147  (front/back matter counts are bracketed;
+                                     147 is the real, unbracketed pagination)
+      "[18], 159, 43 p."   -> 159  (multi-part pagination: take the largest
+                                     unbracketed run as the representative
+                                     count, rather than trying to sum parts
+                                     whose relationship to each other TCP
+                                     doesn't spell out consistently)
+      "1 sheet ([1] p.)"   -> 1    (broadside; "1" from "1 sheet")
+      "[8] p."             -> 8    (every number is bracketed here - an
+                                     editor-supplied count for an unpaginated
+                                     item - so we fall back to using it)
+    Heuristic: only look at the text up to the first "p." marker (anything
+    after that, like "; 4to.", is a leaf-format/size code, not a page
+    count), then take the largest UNbracketed number in that span. If
+    every number in the span is bracketed, fall back to the largest
+    bracketed one rather than returning nothing.
+    """
+    if not extent:
+        return ""
+    m_p = re.search(r"p\b", extent)
+    if not m_p:
+        return ""
+    prefix = extent[:m_p.end()]
+
+    numbers = []
+    for m in re.finditer(r"(\[)?(\d+)(\])?", prefix):
+        bracketed = bool(m.group(1) and m.group(3))
+        numbers.append((bracketed, int(m.group(2))))
+    if not numbers:
+        return ""
+
+    unbracketed = [n for br, n in numbers if not br]
+    if unbracketed:
+        return str(max(unbracketed))
+    return str(max(n for _, n in numbers))
 
 
 def normalize_language(raw):
@@ -129,11 +171,18 @@ def extract_metadata(root, path):
     estc = ";".join(id_map.get("ESTC", []))
     stc = ";".join(id_map.get("stc", []))
 
-    extent = find(".//EXTENT")
-    pages = ""
-    m = re.search(r"(\d+)\s*p", extent)
-    if m:
-        pages = m.group(1)
+    # NOTE: like EEBO/ECCO, the header carries TWO <EXTENT> elements - a
+    # top-level one under FILEDESC describing the scan/transcription (no
+    # usable page count) and the actual bibliographic one nested deeper
+    # (e.g. "[4], 147, [1] p."). The wrapper around that second EXTENT
+    # varies across records (BIBLFULL vs BIBLSTRUCT vs others), so rather
+    # than hard-coding one ancestor tag we take the LAST EXTENT under the
+    # header - the technical one is reliably first in document order and
+    # the bibliographic one comes after it regardless of what wraps it.
+    # A plain ".//EXTENT" (first match) would return the wrong one.
+    extent_nodes = header.findall(".//EXTENT") if header is not None else []
+    extent = safe_text(extent_nodes[-1]) if extent_nodes else ""
+    pages = parse_page_count(extent)
 
     # all_ids keeps every IDNO value found, regardless of TYPE, so nothing
     # from the header is lost even if multiple IDNOs share the same TYPE.
