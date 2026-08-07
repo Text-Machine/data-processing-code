@@ -7,6 +7,7 @@ This repository contains the data acquisition and processing pipelines used to b
 ```
 data-processing-code/
 ├── download_raw_data_code/       # Scripts for downloading raw datasets and their metadata
+├── pipeline_eebo_ecco_evans/     # Preprocessing pipeline for the EEBO, ECCO, and Evans TCP collections
 ├── pipeline_bl_microsoft/        # End-to-end processing pipeline for the BL Microsoft dataset
 ├── pipeline_hmd_lwm/             # Processing pipeline for the HMD/LWM dataset
 ├── LICENSE
@@ -17,6 +18,9 @@ data-processing-code/
 
 ### `download_raw_data_code/`
 Aggregates multiple historical and literary corpora from different sources. See [`download_raw_data_code/README.md`](download_raw_data_code/README.md) for a concise guide describing how each dataset is obtained, along with dataset version information.
+
+### `pipeline_eebo_ecco_evans/`
+Preprocesses the EEBO, ECCO, and Evans TCP XML collections into per-book plain text files and a metadata CSV (title, author, birth/death years, publication date, place, publisher, language, page count, word count, and source/output paths). Requires the raw datasets to have been downloaded first, as described in `download_raw_data_code/README.md` (section *"TCP Collections (EEBO, ECCO, Evans)"*). See [`pipeline_eebo_ecco_evans/README.md`](pipeline_eebo_ecco_evans/README.md) for full details.
 
 ### `pipeline_bl_microsoft/`
 End-to-end pipeline for producing a fully processed metadata file for the BL Microsoft dataset. Must be run in the order of its numbered steps (preprocessing/metadata extraction → deduplication → LLM genre classification → data filtering → mask unrolling → BERT masked-word prediction). Requires the raw dataset to have been downloaded first, as described in `download_raw_data_code/README.md` (section *"2. BL Microsoft Collection"*). See [`pipeline_bl_microsoft/README.md`](pipeline_bl_microsoft/README.md) for full details.
