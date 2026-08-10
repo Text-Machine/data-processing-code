@@ -58,11 +58,9 @@ Use the provided bash script:
 bash bl_microsoft.sh
 ```
 
-The corpus has been assigned the following DOI: https://doi.org/10.23636/r7w6-zy15. The script above downloads all the 12 dataset parts using the `zenodo_get` Python library.
-
 ### Version
 
-Dataset version information is available at the DOI URL listed above. The corpus has been published in 2021.
+The corpus has been published in 2021 with the following DOI: https://doi.org/10.23636/r7w6-zy15. 
 
 ## 3. Zenodo-hosted Datasets
 
