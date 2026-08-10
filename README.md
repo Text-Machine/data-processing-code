@@ -42,3 +42,7 @@ This repository's branches reflect different stages of the pipeline. Branches pr
 ## License
 
 See [LICENSE](LICENSE) for details.
+
+## Acknowledgements
+
+This work is supported by Schmidt Sciences, grant number G-25-69397.
