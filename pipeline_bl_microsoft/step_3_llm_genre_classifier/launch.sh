@@ -23,8 +23,8 @@ ENV_PATH="/gpfs/scratch/bsc100/paolo/.conda/envs/llm-genre-classification-env"
 # Paths
 # ---------------------------------------------------------------------------
 SCRIPT="$SLURM_SUBMIT_DIR/genre_classifier.py"
-INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata"
-OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata"
+INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft"
+OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft"
 mkdir -p "$OUTPUT_DIR"
 MODEL="gemma-4-31b"   # shorthand: llama-8b | gemma-4-31b
 # or set a full path: /gpfs/projects/bsc100/models/gemma4/gemma-4-31B-it

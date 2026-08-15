@@ -16,8 +16,8 @@ cd "$SLURM_SUBMIT_DIR"
 source "${SLURM_SUBMIT_DIR}/../query_word_config.sh"
 
 export BERT_MODELS_BASE="/gpfs/projects/bsc100/models/bert_textmachine"
-export BERT_INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata"
-export BERT_OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata"
+export BERT_INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft"
+export BERT_OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft"
 export BERT_SUFFIX="spacy"   # must match step 4/5 suffix
 export BERT_QUERY_WORDS="$(IFS=,; echo "${QUERY_WORDS[*]}")"
 mkdir -p "$BERT_OUTPUT_DIR"

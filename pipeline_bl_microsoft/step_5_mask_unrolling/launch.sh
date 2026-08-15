@@ -13,8 +13,8 @@ mkdir -p logs
 
 source "${SLURM_SUBMIT_DIR}/../query_word_config.sh"
 
-INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata/"
-OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata/"
+INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft/"
+OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft/"
 SUFFIX="spacy"   # must match the suffix used in step 4 (spacy or regex)
 
 echo "Words this run: ${QUERY_WORDS[*]}"
