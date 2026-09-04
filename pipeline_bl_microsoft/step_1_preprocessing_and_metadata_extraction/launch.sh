@@ -6,7 +6,7 @@
 #SBATCH -q gp_debug
 
 INPUT_DIR="/gpfs/projects/bsc100/textmachine-data/downloaded_data_vm"
-OUTPUT_CSV="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata/metadata_blmicrosoft_step_1.csv"
+OUTPUT_CSV="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft/metadata_blmicrosoft_step_1.csv"
 
 cd $SLURM_SUBMIT_DIR
 

@@ -26,8 +26,7 @@ OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated
 LOG_DIR="$SLURM_SUBMIT_DIR/logs_filter_blmicrosoft"
 SCRIPT="$SLURM_SUBMIT_DIR/filter_data_blmicrosoft_spacy.py"
 
-#METADATA=/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata/blmicrosoft_final_metadata.csv.csv
-METADATA=/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata/metadata_blmicrosoft_step_3.csv
+METADATA=/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft/metadata_blmicrosoft_step_3.csv
 DATA_ROOT=/gpfs/projects/bsc100/textmachine-data/downloaded_data_vm
 mkdir -p "$LOG_DIR"
 
