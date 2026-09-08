@@ -1,0 +1,1 @@
+QUERY_WORDS=("machine" "machines")
