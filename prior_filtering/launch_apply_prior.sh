@@ -1,18 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=prior_filter_apply
+#SBATCH --job-name=apply_prior
 #SBATCH --account=bsc100
 #SBATCH --qos=gp_debug
-#SBATCH --time=00:05:00
+#SBATCH --time=00:10:00
 #SBATCH --cpus-per-task=4
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-##SBATCH --constraint=highmem
 
 set -euo pipefail
 
-echo "Running on node: $(hostname)"
-echo "Job ID: ${SLURM_JOB_ID:-local}"
-date
+# ------------------------------------------------------------
+# Environment
+# ------------------------------------------------------------
 
 # --- Point at the pre-downloaded, offline HF cache on GPFS -----------------
 # Must match the HF_HOME used in download_assets.sh.
@@ -31,16 +30,32 @@ conda activate "$ENV_PATH"
 
 cd "$SLURM_SUBMIT_DIR"
 
+# ------------------------------------------------------------
+# Paths
+# ------------------------------------------------------------
 
-# --- Sanity check: cache is present before we even try ----------------------
-if [ ! -d "$HF_HOME" ]; then
-  echo "ERROR: HF_HOME ($HF_HOME) not found."
-  echo "Run download_assets.sh from alogin4/glogin4 first -- compute nodes"
-  echo "have no internet and cannot fetch the tokenizer themselves."
-  exit 1
-fi
+mkdir -p logs
 
-python3 apply_prior.py
+echo "========================================"
+echo "Job:       $SLURM_JOB_NAME"
+echo "Job ID:    $SLURM_JOB_ID"
+echo "Node:      $(hostname)"
+echo "Start:     $(date)"
+echo "CPUs:      $SLURM_CPUS_PER_TASK"
+echo "Working dir:"
+pwd
+echo "========================================"
 
-echo "Done."
-date
+# ------------------------------------------------------------
+# Run
+# ------------------------------------------------------------
+
+python apply_prior_v3.py
+
+# ------------------------------------------------------------
+# Finished
+# ------------------------------------------------------------
+
+echo "========================================"
+echo "Finished: $(date)"
+echo "========================================"
