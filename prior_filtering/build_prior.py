@@ -1,23 +1,83 @@
 #!/usr/bin/env python3
 """
-build_prior_v3.py — Step 1 of the prior-filtering pipeline.
+build_prior_final.py — Build the TF x DF token prior over the BL Microsoft corpus.
 
-Builds one TF x DF token-count pallet for ONE BL Microsoft decade folder.
-The SLURM array launcher runs this script once per decade.
+This version uses each processed page as a single document. There is NO
+512-token chunking.
 
-Required corpus filters:
+Required corpus filters (all three enforced in filter_metadata):
     - best_version == 1
     - main_language == "English"
     - date in [1800, 1899]
 
-For each decade task, saves:
-    prior_filter/blmicrosoft/partials/pallet_{decade}.pt
+Document definition
+-------------------
+Each valid page is treated as one document for TF/DF and QA statistics.
 
-The partial file contains the raw TF/DF pallet plus the page reservoir
-needed by merge_prior_v3.py to compute the corpus-level mu/sigma baseline.
+    page tokens: [t0, t1, ..., t999]
+    → one document containing all tokens
+
+Long pages are NOT truncated or split. Short pages that pass MIN_PAGE_CHARS
+are also kept as complete documents.
+
+The TF/DF prior therefore represents:
+    TF = total token frequency across all pages
+    DF = number of pages containing each token (once per page, regardless
+         of how many times the token repeats within that page)
+
+QA reservoir and corpus baseline statistics
+-------------------------------------------
+While streaming through the corpus to build the prior, a random sample of
+pages is collected into a QA reservoir (default: 5,000 pages) using
+reservoir sampling. Every page has an equal probability of being selected
+regardless of the order it is encountered or the total corpus size.
+
+Once the prior is fully built, each reservoir page is scored against it to
+compute two statistics:
+
+    mu_d    (sentence_mean_log_prior)
+        = mean(log(prior[t])) over all tokens t in the page
+        Low  → tokens are rarer than typical (noise, garbled OCR)
+        High → tokens are very common (possible repetitive content)
+
+    sigma_d (sentence_prior_dispersion)
+        = std(prior[t] * 1000) over all tokens t in the page
+        Low  → token frequencies are uniform (repetitive or garbled)
+        High → healthy mix of common and rare words (normal prose)
+
+The mean and std of mu_d and sigma_d across the reservoir become the
+corpus baseline:
+
+    corpus_mean_log_prior          mean of mu_d    across reservoir pages
+    corpus_mean_log_prior_std      std  of mu_d    across reservoir pages
+    corpus_prior_dispersion        mean of sigma_d across reservoir pages
+    corpus_prior_dispersion_std    std  of sigma_d across reservoir pages
+
+These four numbers are saved into the prior file. apply_prior.py uses them
+as a fixed reference baseline when scoring sentences: it never recomputes
+them from the dataset being scored.
+
+Why the reservoir and not the full corpus?
+    To score a page you need the prior (you look up prior[t] for each
+    token). But the prior does not exist until all pages have been seen.
+    A second full pass over 8.8M pages would roughly double the runtime.
+    5,000 reservoir pages are more than enough for stable mean/std
+    estimates (the values converge well before that size).
+
+Output
+------
+A single .pt file containing:
+    prior                       float32 tensor [vocab_size]
+    vocab_size                  int
+    tokenizer_name              str
+    n_pages                     int
+    n_books                     int
+    corpus_mean_log_prior       float   mean of mu_d    across reservoir
+    corpus_mean_log_prior_std   float   std  of mu_d    across reservoir
+    corpus_prior_dispersion     float   mean of sigma_d across reservoir
+    corpus_prior_dispersion_std float   std  of sigma_d across reservoir
 """
 
-import argparse
 import gzip
 import io
 import json
@@ -25,7 +85,6 @@ import os
 import random
 import re
 import tarfile
-from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -41,7 +100,9 @@ METADATA_CSV = Path(
     "consolidated_metadata_blmicrosoft/metadata_blmicrosoft_step_3.csv"
 )
 
-DATA_ROOT = Path("/gpfs/projects/bsc100/textmachine-data/downloaded_data_vm")
+DATA_ROOT = Path(
+    "/gpfs/projects/bsc100/textmachine-data/downloaded_data_vm"
+)
 
 DECADE_TO_TAR = {
     "1800_1809": "OCR_text_1800_-_1809.tar.gz",
@@ -56,58 +117,36 @@ DECADE_TO_TAR = {
     "1890_1899": "OCR_text_1890_-_1899.tar.gz",
 }
 
-VALID_DECADES = tuple(DECADE_TO_TAR.keys())
-
-# --- subset selection --------------------------------------------------------
-N_BOOKS = None          # cap number of books per decade; None = all
+# --- subset selection -------------------------------------------------------
+N_BOOKS      = None   # cap total books (random sample). None = use all
 RANDOM_STATE = 42
-BOOK_IDS = None         # explicit list of book_ids to include, or None
+BOOK_IDS     = None   # explicit list of book_ids to include, or None
 
-# --- page-level filtering ----------------------------------------------------
-MAX_PAGES_PER_BOOK = None   # None = no cap
-SKIP_EMPTY_PAGES = True
-MIN_PAGE_CHARS = 50
+# --- page filtering ---------------------------------------------------------
+MAX_PAGES_PER_BOOK = None
+SKIP_EMPTY_PAGES   = True
+MIN_PAGE_CHARS     = 50
 
-# --- output ------------------------------------------------------------------
-PARTIAL_OUTPUT_DIR = Path("prior_filter/blmicrosoft/partials")
+# --- tokenization -----------------------------------------------------------
+TOKENIZER_NAME   = "gpt2-large"
+TOKEN_BATCH_SIZE = 64
 
-TOKENIZER_NAME = "gpt2-large"
+# --- output -----------------------------------------------------------------
+OUTPUT_PRIOR_PATH = Path(
+    "/gpfs/projects/bsc100/textmachine-data/preprocessed_data/prior_filter_blmicrosoft/prior_blmicrosoft.pt"
+)
 
-# Tokenize pages in batches rather than one Python/Rust call per page.
-TOKENIZE_BATCH_SIZE = 64
-
-# Additive smoothing is applied only by merge_prior_v3.py, after all
-# decade-level TF/DF pallets have been summed.
-SMOOTHING_EPS = 1e-6
-
-# --- memory / progress controls ---------------------------------------------
-QA_SAMPLE_SIZE = 5000
+# --- smoothing / QA reservoir -----------------------------------------------
+SMOOTHING_EPS          = 1e-6   # Laplace: keeps prior > 0 for all tokens
+QA_SAMPLE_SIZE         = 5000   # reservoir pages for corpus baseline stats
 PROGRESS_EVERY_N_BOOKS = 500
-
-
-# =============================================================================
-# argument parsing
-# =============================================================================
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--decade",
-        required=True,
-        choices=VALID_DECADES,
-        help="Decade folder to process, e.g. 1840_1849.",
-    )
-    return parser.parse_args()
 
 
 # =============================================================================
 # metadata filtering
 # =============================================================================
 
-def filter_metadata(df: pd.DataFrame, decade_folder: str) -> pd.DataFrame:
-    """
-    Apply the corpus filters and select exactly one decade folder.
-    """
+def filter_metadata(df: pd.DataFrame) -> pd.DataFrame:
     n_start = len(df)
 
     df = df[df["best_version"] == 1]
@@ -118,17 +157,11 @@ def filter_metadata(df: pd.DataFrame, decade_folder: str) -> pd.DataFrame:
 
     df = df.copy()
     df["_year"] = pd.to_numeric(df["date"], errors="coerce")
-    n_bad_date = df["_year"].isna().sum()
-    if n_bad_date:
-        print(f"  [warn] {n_bad_date} row(s) with unparseable date dropped")
-
-    df = df[df["_year"].between(1800, 1899)]
-    df["decade_folder"] = df["path_to_json"].str.split("/").str[0]
-    df = df[df["decade_folder"] == decade_folder]
-    df = df.drop(columns=["_year"])
-
+    n_bad = df["_year"].isna().sum()
+    if n_bad:
+        print(f"  [warn] {n_bad} row(s) with unparseable date dropped")
+    df = df[df["_year"].between(1800, 1899)].drop(columns=["_year"])
     print(f"  after date in [1800, 1899]:   {len(df):>7,}")
-    print(f"  after decade={decade_folder}:      {len(df):>7,}")
 
     if BOOK_IDS is not None:
         df = df[df["book_id"].isin(BOOK_IDS)]
@@ -136,7 +169,7 @@ def filter_metadata(df: pd.DataFrame, decade_folder: str) -> pd.DataFrame:
 
     if N_BOOKS is not None and len(df) > N_BOOKS:
         df = df.sample(n=N_BOOKS, random_state=RANDOM_STATE)
-        print(f"  after N_BOOKS={N_BOOKS} cap:  {len(df):>7,}")
+        print(f"  after N_BOOKS={N_BOOKS} cap:       {len(df):>7,}")
 
     return df.reset_index(drop=True)
 
@@ -150,336 +183,288 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 
 def load_tokenizer():
-    """
-    Returns (tokenize_batch_fn, vocab_size, tokenizer_name).
-
-    tokenize_batch_fn(texts) -> list[list[int]]
-
-    With GPT2TokenizerFast, one tokenizer call handles a whole batch.
-    The fallback keeps the same batched interface.
-    """
     try:
         import transformers
 
         tok = transformers.GPT2TokenizerFast.from_pretrained(TOKENIZER_NAME)
         tok.model_max_length = int(1e12)
 
-        # Silent-failure guard.
         test_ids = tok("the quick brown fox")["input_ids"]
         if tok.vocab_size < 1000 or len(test_ids) == 0:
             raise RuntimeError(
-                f"Tokenizer loaded but looks broken (vocab_size={tok.vocab_size}, "
-                f"test tokenization returned {len(test_ids)} ids). "
-                f"Re-run download_assets.sh and verify HF_HOME on this node."
+                f"Tokenizer looks broken (vocab_size={tok.vocab_size}, "
+                f"test={len(test_ids)} ids). Check HF_HOME / offline cache."
             )
 
         print(
             f"Using GPT2TokenizerFast ('{TOKENIZER_NAME}'), "
-            f"vocab_size={tok.vocab_size}, batch_size={TOKENIZE_BATCH_SIZE}."
+            f"vocab_size={tok.vocab_size}, batch_size={TOKEN_BATCH_SIZE}."
         )
 
-        def tokenize_batch(texts):
-            encoded = tok(
+        def batch_tok_fn(texts):
+            enc = tok(
                 texts,
+                add_special_tokens=False,
                 padding=False,
                 truncation=False,
-                add_special_tokens=True,
             )
-            return encoded["input_ids"]
+            return enc["input_ids"]
 
-        return tokenize_batch, tok.vocab_size, TOKENIZER_NAME
+        return batch_tok_fn, tok.vocab_size, TOKENIZER_NAME
 
-    except Exception as e:
-        print(f"[fallback] Could not load {TOKENIZER_NAME} ({type(e).__name__}: {e})")
+    except Exception as exc:
+        print(f"[fallback] Could not load {TOKENIZER_NAME} "
+              f"({type(exc).__name__}: {exc})")
         print("[fallback] Using simple whitespace/punctuation tokenizer.")
 
-        vocab = {}
+        vocab: dict[str, int] = {}
 
-        def tokenize_one(text):
-            ids = []
-            for t in re.findall(r"\w+|[^\w\s]", text.lower()):
-                if t not in vocab:
-                    vocab[t] = len(vocab)
-                ids.append(vocab[t])
-            return ids
+        def _id(w: str) -> int:
+            if w not in vocab:
+                vocab[w] = len(vocab)
+            return vocab[w]
 
-        def tokenize_batch(texts):
-            return [tokenize_one(text) for text in texts]
+        def batch_tok_fn(texts):
+            return [
+                [_id(t) for t in re.findall(r"\w+|[^\w\s]", text.lower())]
+                for text in texts
+            ]
 
-        return tokenize_batch, None, "whitespace_fallback"
-
-
-# =============================================================================
-# batch processing helpers
-# =============================================================================
-
-def process_tokenized_page(
-    ids,
-    text,
-    row,
-    page,
-    pallet,
-    use_dense,
-    vocab_size,
-    tf_counts,
-    df_counts,
-    qa_reservoir,
-    rng,
-    n_pages,
-):
-    """Update TF/DF counts and the QA reservoir for one already-tokenized page."""
-    if not ids:
-        return n_pages
-
-    if use_dense:
-        x = torch.tensor(ids, dtype=torch.long)
-        pallet[0] += torch.bincount(x, minlength=vocab_size)
-        pallet[1, x.unique()] += 1
-    else:
-        for tid in ids:
-            tf_counts[tid] += 1
-        for tid in set(ids):
-            df_counts[tid] += 1
-
-    n_pages += 1
-
-    meta = {
-        "record_id": row["record_id"],
-        "book_id": row["book_id"],
-        "pg": page.get("pg"),
-    }
-
-    if len(qa_reservoir) < QA_SAMPLE_SIZE:
-        qa_reservoir.append((text, meta))
-    else:
-        j = rng.randint(0, n_pages - 1)
-        if j < QA_SAMPLE_SIZE:
-            qa_reservoir[j] = (text, meta)
-
-    return n_pages
-
-
-def flush_token_batch(
-    batch_texts,
-    batch_pages,
-    tokenize_batch,
-    pallet,
-    use_dense,
-    vocab_size,
-    tf_counts,
-    df_counts,
-    qa_reservoir,
-    rng,
-    n_pages,
-):
-    """Tokenize one batch and unpack the results into the running pallet."""
-    if not batch_texts:
-        return n_pages
-
-    batch_ids = tokenize_batch(batch_texts)
-
-    if len(batch_ids) != len(batch_texts):
-        raise RuntimeError(
-            f"Tokenizer returned {len(batch_ids)} results for "
-            f"{len(batch_texts)} input texts."
-        )
-
-    for ids, (text, row, page) in zip(batch_ids, batch_pages):
-        n_pages = process_tokenized_page(
-            ids=ids,
-            text=text,
-            row=row,
-            page=page,
-            pallet=pallet,
-            use_dense=use_dense,
-            vocab_size=vocab_size,
-            tf_counts=tf_counts,
-            df_counts=df_counts,
-            qa_reservoir=qa_reservoir,
-            rng=rng,
-            n_pages=n_pages,
-        )
-
-    batch_texts.clear()
-    batch_pages.clear()
-
-    return n_pages
+        return batch_tok_fn, None, "whitespace_fallback"
 
 
 # =============================================================================
-# streaming prior build
+# pallet update helpers
 # =============================================================================
 
-def build_prior_streaming(
-    metadata_csv: Path,
-    decade_folder: str,
-    tokenize_batch,
-    vocab_size,
-):
+def update_pallet_dense(pallet: torch.Tensor, ids: list[int], vocab_size: int):
+    x = torch.tensor(ids, dtype=torch.long)
+    pallet[0] += torch.bincount(x, minlength=vocab_size)  # TF
+    pallet[1, x.unique()] += 1                             # DF: once per page
+
+
+def update_pallet_sparse(tf_counts: dict, df_counts: dict, ids: list[int]):
+    for tid in ids:
+        tf_counts[tid] += 1
+    for tid in set(ids):
+        df_counts[tid] += 1
+
+
+# =============================================================================
+# main streaming loop
+# =============================================================================
+
+def build_prior(metadata_csv: Path, batch_tok_fn, vocab_size):
     df = pd.read_csv(metadata_csv, dtype={"record_id": str, "book_id": str})
     print(f"\nMetadata loaded: {len(df):,} total rows")
-    df = filter_metadata(df, decade_folder)
-
-    print(
-        f"\nSelected {len(df):,} book(s) in decade folder '{decade_folder}'."
-    )
+    df = filter_metadata(df)
+    df = df.assign(decade_folder=df["path_to_json"].str.split("/").str[0])
+    print(f"Selected {len(df):,} book(s) across "
+          f"{df['decade_folder'].nunique()} decade folder(s).\n")
 
     use_dense = vocab_size is not None
-
     if use_dense:
         pallet = torch.zeros((2, vocab_size), dtype=torch.long)
-        tf_counts = None
-        df_counts = None
+        tf_counts = df_counts = None
     else:
         pallet = None
-        tf_counts = defaultdict(int)
-        df_counts = defaultdict(int)
+        tf_counts: dict[int, int] = {}
+        df_counts: dict[int, int] = {}
+        vocab_size = 0
 
-    qa_reservoir = []
-    # Distinguish the decade tasks while keeping deterministic sampling.
-    decade_seed = RANDOM_STATE + VALID_DECADES.index(decade_folder)
-    rng = random.Random(decade_seed)
+    # Reservoir: list of (page_token_ids, metadata_dict)
+    # Populated via reservoir sampling as pages are streamed.
+    # Scored against the prior AFTER the full prior is built.
+    qa_reservoir: list[tuple[list[int], dict]] = []
+    rng = random.Random(RANDOM_STATE)
 
     n_pages = 0
-    n_books_done = 0
+    n_books = 0
     books_seen: set[str] = set()
+    batch_texts: list[str] = []
+    batch_meta:  list[dict] = []
 
-    tar_name = DECADE_TO_TAR[decade_folder]
-    tar_path = DATA_ROOT / tar_name
+    def flush_batch():
+        nonlocal n_pages, vocab_size
 
-    row_lookup = {
-        row["path_to_json"]: row
-        for _, row in df.iterrows()
-    }
-    remaining = set(row_lookup.keys())
+        if not batch_texts:
+            return
 
-    print(f"  streaming {tar_path.name} for {len(remaining)} book(s) ...")
+        all_ids: list[list[int]] = batch_tok_fn(batch_texts)
 
-    batch_texts = []
-    batch_pages = []
-
-    with tarfile.open(tar_path, mode="r|gz") as tar:
-        for member in tar:
-            if not remaining:
-                break
-
-            if member.name not in remaining:
+        for page_ids, meta in zip(all_ids, batch_meta):
+            if not page_ids:
                 continue
 
-            f = tar.extractfile(member)
-            if f is None:
+            if use_dense:
+                update_pallet_dense(pallet, page_ids, vocab_size)
+            else:
+                update_pallet_sparse(tf_counts, df_counts, page_ids)
+                vocab_size = max(vocab_size, max(page_ids) + 1)
+
+            # Reservoir sampling (Knuth/Vitter):
+            # each page seen so far has equal probability of being in
+            # the reservoir at any point during streaming.
+            n_pages += 1
+            if len(qa_reservoir) < QA_SAMPLE_SIZE:
+                qa_reservoir.append((page_ids, meta))
+            else:
+                j = rng.randint(0, n_pages - 1)
+                if j < QA_SAMPLE_SIZE:
+                    qa_reservoir[j] = (page_ids, meta)
+
+        batch_texts.clear()
+        batch_meta.clear()
+
+    for decade_folder, group in df.groupby("decade_folder"):
+        tar_name = DECADE_TO_TAR.get(decade_folder)
+        if tar_name is None:
+            print(f"  [warn] no tar mapping for '{decade_folder}', "
+                  f"skipping {len(group)} row(s).")
+            continue
+
+        tar_path = DATA_ROOT / tar_name
+        row_lookup = {row["path_to_json"]: row for _, row in group.iterrows()}
+        remaining  = set(row_lookup.keys())
+        print(f"  streaming {tar_path.name} ({len(remaining)} book(s)) ...")
+
+        with tarfile.open(tar_path, mode="r|gz") as tar:
+            for member in tar:
+                if not remaining:
+                    break
+                if member.name not in remaining:
+                    continue
+
+                f = tar.extractfile(member)
+                if f is None:
+                    remaining.discard(member.name)
+                    continue
+
+                raw = f.read()
+                row = row_lookup[member.name]
+                n_added = 0
+
+                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                    for line in gz:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            page = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if SKIP_EMPTY_PAGES and page.get("empty_pg"):
+                            continue
+                        text = (page.get("text") or "").strip()
+                        if len(text) < MIN_PAGE_CHARS:
+                            continue
+
+                        batch_texts.append(text)
+                        batch_meta.append({
+                            "record_id": row["record_id"],
+                            "book_id":   row["book_id"],
+                            "pg":        page.get("pg"),
+                        })
+                        n_added += 1
+
+                        if len(batch_texts) >= TOKEN_BATCH_SIZE:
+                            flush_batch()
+
+                        if MAX_PAGES_PER_BOOK and n_added >= MAX_PAGES_PER_BOOK:
+                            break
+
+                flush_batch()
                 remaining.discard(member.name)
-                continue
+                books_seen.add(row["book_id"])
+                n_books += 1
 
-            raw = f.read()
-            row = row_lookup[member.name]
-            n_added = 0
+                if n_books % PROGRESS_EVERY_N_BOOKS == 0:
+                    print(f"    ... {n_books:,} books | {n_pages:,} pages so far")
 
-            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
-                for line in gz:
-                    line = line.strip()
-                    if not line:
-                        continue
+        flush_batch()
 
-                    try:
-                        page = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+        if remaining:
+            print(f"  [warn] {len(remaining)} member(s) not found in "
+                  f"{tar_path.name}: {sorted(remaining)[:5]}")
+        print(f"  {decade_folder} done: {n_books:,} books, "
+              f"{n_pages:,} pages total so far.")
 
-                    if SKIP_EMPTY_PAGES and page.get("empty_pg"):
-                        continue
-
-                    text = (page.get("text") or "").strip()
-                    if len(text) < MIN_PAGE_CHARS:
-                        continue
-
-                    batch_texts.append(text)
-                    batch_pages.append((text, row, page))
-                    n_added += 1
-
-                    if len(batch_texts) >= TOKENIZE_BATCH_SIZE:
-                        n_pages = flush_token_batch(
-                            batch_texts=batch_texts,
-                            batch_pages=batch_pages,
-                            tokenize_batch=tokenize_batch,
-                            pallet=pallet,
-                            use_dense=use_dense,
-                            vocab_size=vocab_size,
-                            tf_counts=tf_counts,
-                            df_counts=df_counts,
-                            qa_reservoir=qa_reservoir,
-                            rng=rng,
-                            n_pages=n_pages,
-                        )
-
-                    if (
-                        MAX_PAGES_PER_BOOK is not None
-                        and n_added >= MAX_PAGES_PER_BOOK
-                    ):
-                        break
-
-            # A page/book member is complete even if its final few pages
-            # remain buffered; the buffer may be flushed after this member.
-            n_pages = flush_token_batch(
-                batch_texts=batch_texts,
-                batch_pages=batch_pages,
-                tokenize_batch=tokenize_batch,
-                pallet=pallet,
-                use_dense=use_dense,
-                vocab_size=vocab_size,
-                tf_counts=tf_counts,
-                df_counts=df_counts,
-                qa_reservoir=qa_reservoir,
-                rng=rng,
-                n_pages=n_pages,
-            )
-
-            remaining.discard(member.name)
-            books_seen.add(row["book_id"])
-            n_books_done += 1
-
-            if n_books_done % PROGRESS_EVERY_N_BOOKS == 0:
-                print(
-                    f"    ... {n_books_done} books processed, "
-                    f"{n_pages} pages so far"
-                )
-
-    # Flush anything left over in the very unlikely case that the loop exits
-    # after an early tar termination.
-    n_pages = flush_token_batch(
-        batch_texts=batch_texts,
-        batch_pages=batch_pages,
-        tokenize_batch=tokenize_batch,
-        pallet=pallet,
-        use_dense=use_dense,
-        vocab_size=vocab_size,
-        tf_counts=tf_counts,
-        df_counts=df_counts,
-        qa_reservoir=qa_reservoir,
-        rng=rng,
-        n_pages=n_pages,
-    )
-
-    if remaining:
-        print(
-            f"  [warn] {len(remaining)} member(s) not found in {tar_path.name}: "
-            f"{sorted(remaining)[:5]}"
-        )
-
-    print(
-        f"\nDone streaming {decade_folder}: "
-        f"{n_pages:,} page(s) across {len(books_seen):,} book(s)."
-    )
+    flush_batch()
+    print(f"\nStreaming complete: {n_pages:,} pages across {len(books_seen):,} books.")
 
     if not use_dense:
         vocab_size = (max(tf_counts.keys()) + 1) if tf_counts else 1
         pallet = torch.zeros((2, vocab_size), dtype=torch.long)
-        for tid, count in tf_counts.items():
-            pallet[0, tid] = count
-        for tid, count in df_counts.items():
-            pallet[1, tid] = count
+        for tid, c in tf_counts.items():
+            pallet[0, tid] = c
+        for tid, c in df_counts.items():
+            pallet[1, tid] = c
 
     return pallet, vocab_size, n_pages, books_seen, qa_reservoir
+
+
+# =============================================================================
+# prior computation and corpus baseline statistics
+# =============================================================================
+
+def compute_prior_and_stats(pallet, vocab_size, qa_reservoir):
+    tf_t     = pallet[0].float()
+    df_t     = pallet[1].float()
+    weighted = tf_t * df_t
+    prior    = (weighted + SMOOTHING_EPS) / (
+        weighted.sum() + SMOOTHING_EPS * vocab_size
+    )
+
+    # ------------------------------------------------------------------
+    # Score every page in the QA reservoir against the now-complete prior.
+    #
+    # For each page we compute:
+    #   mu_d    = mean(log(prior[t])) over all tokens  → sentence_mean_log_prior
+    #   sigma_d = std(prior[t] * 1000)                 → sentence_prior_dispersion
+    #
+    # Then we take the mean and std of those values across all reservoir
+    # pages to get the four corpus baseline numbers saved to the prior file.
+    # ------------------------------------------------------------------
+    print(f"\nComputing corpus baseline stats from "
+          f"{len(qa_reservoir)} reservoir pages ...")
+
+    mus:    list[float] = []
+    sigmas: list[float] = []
+
+    for page_ids, _ in qa_reservoir:
+        if not page_ids:
+            continue
+        x  = torch.tensor(page_ids, dtype=torch.long)
+        tp = prior[x]
+        mus.append(tp.log().mean().item())
+        sigmas.append((tp * 1000).std().item() if len(page_ids) > 1 else 0.0)
+
+    if not mus:
+        raise SystemExit(
+            "No valid pages in QA reservoir — cannot compute corpus baseline stats."
+        )
+
+    mus_t    = torch.tensor(mus)
+    sigmas_t = torch.tensor(sigmas)
+
+    corpus_mean_log_prior       = mus_t.mean().item()
+    corpus_mean_log_prior_std   = mus_t.std().item()
+    corpus_prior_dispersion     = sigmas_t.mean().item()
+    corpus_prior_dispersion_std = sigmas_t.std().item()
+
+    print(f"  corpus_mean_log_prior:       "
+          f"{corpus_mean_log_prior:.4f} ± {corpus_mean_log_prior_std:.4f}")
+    print(f"  corpus_prior_dispersion:     "
+          f"{corpus_prior_dispersion:.4f} ± {corpus_prior_dispersion_std:.4f}")
+
+    return (
+        prior,
+        corpus_mean_log_prior,
+        corpus_mean_log_prior_std,
+        corpus_prior_dispersion,
+        corpus_prior_dispersion_std,
+    )
 
 
 # =============================================================================
@@ -487,50 +472,49 @@ def build_prior_streaming(
 # =============================================================================
 
 def main():
-    args = parse_args()
-
     print("=" * 72)
-    print(f"Building prior partial for decade: {args.decade}")
-    print(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'local')}")
+    print("build_prior_final.py — document unit: complete page, no chunking")
+    print(f"Job ID:   {os.environ.get('SLURM_JOB_ID', 'local')}")
     print(f"Hostname: {os.uname().nodename}")
     print("=" * 72)
 
-    tokenize_batch, vocab_size, tokenizer_name = load_tokenizer()
+    batch_tok_fn, vocab_size, tokenizer_name = load_tokenizer()
 
-    pallet, vocab_size, n_pages, books_seen, qa_reservoir = build_prior_streaming(
-        METADATA_CSV,
-        args.decade,
-        tokenize_batch,
-        vocab_size,
+    pallet, vocab_size, n_pages, books_seen, qa_reservoir = build_prior(
+        METADATA_CSV, batch_tok_fn, vocab_size,
     )
 
-    if n_pages < 1:
-        raise SystemExit(
-            f"No valid pages were loaded for decade {args.decade}. "
-            f"Check metadata, tar mapping, filters and paths."
-        )
+    if n_pages < 2:
+        raise SystemExit("Fewer than 2 pages loaded — check CONFIG filters and paths.")
 
-    PARTIAL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = PARTIAL_OUTPUT_DIR / f"pallet_{args.decade}.pt"
+    (
+        prior,
+        corpus_mean_log_prior,
+        corpus_mean_log_prior_std,
+        corpus_prior_dispersion,
+        corpus_prior_dispersion_std,
+    ) = compute_prior_and_stats(pallet, vocab_size, qa_reservoir)
 
+    OUTPUT_PRIOR_PATH.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "pallet": pallet,
-            "vocab_size": vocab_size,
-            "tokenizer_name": tokenizer_name,
-            "decade": args.decade,
-            "n_pages": n_pages,
-            "n_books": len(books_seen),
-            "qa_reservoir": qa_reservoir,
+            "prior":                       prior,
+            "vocab_size":                  vocab_size,
+            "tokenizer_name":              tokenizer_name,
+            "n_pages":                     n_pages,
+            "n_books":                     len(books_seen),
+            "corpus_mean_log_prior":       corpus_mean_log_prior,
+            "corpus_mean_log_prior_std":   corpus_mean_log_prior_std,
+            "corpus_prior_dispersion":     corpus_prior_dispersion,
+            "corpus_prior_dispersion_std": corpus_prior_dispersion_std,
         },
-        output_path,
+        OUTPUT_PRIOR_PATH,
     )
 
-    print(f"\nSaved partial pallet → {output_path}")
-    print(f"  decade: {args.decade}")
-    print(f"  pages: {n_pages:,}")
-    print(f"  books: {len(books_seen):,}")
-    print(f"  QA reservoir: {len(qa_reservoir):,}")
+    print(f"\nSaved prior → {OUTPUT_PRIOR_PATH}")
+    print(f"  pages:           {n_pages:,}")
+    print(f"  books:           {len(books_seen):,}")
+    print(f"  nonzero entries: {(prior > 0).sum().item():,} / {vocab_size:,}")
 
 
 if __name__ == "__main__":

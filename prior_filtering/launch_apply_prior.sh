@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=apply_prior
+#SBATCH --job-name=apply_prior_bl
 #SBATCH --account=bsc100
 #SBATCH --qos=gp_debug
 #SBATCH --time=00:10:00
@@ -9,52 +9,72 @@
 
 set -euo pipefail
 
-# ------------------------------------------------------------
-# Environment
-# ------------------------------------------------------------
+# ============================================================
+# File Paths Configuration
+# ============================================================
 
-# --- Point at the pre-downloaded, offline HF cache on GPFS -----------------
-# Must match the HF_HOME used in download_assets.sh.
+PRIOR_PATH="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/prior_filter_blmicrosoft/prior_blmicrosoft.pt"
+INPUT_JSONL_PATH="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft/bl_microsoft_slaves_spacy_step_6.jsonl"
+OUTPUT_JSONL_PATH="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft/bl_microsoft_slaves_spacy_step_7.jsonl"
+
+# ============================================================
+# Environment
+# ============================================================
+
 export HF_HOME="/gpfs/scratch/bsc100/paolo/.cache/huggingface"
 export TRANSFORMERS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 
-# --- Environment ------------------------------------------------------------
-# Adjust to whatever module/conda setup you use elsewhere in your pipeline
-# (mirroring the pattern from your existing SLURM scripts for this project).
-#module purge
 ENV_PATH="/gpfs/scratch/bsc100/paolo/.conda/envs/textmachine-llm"
+
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_PATH"
-# source activate prior_filter   # uncomment if using a dedicated conda env
+
+# ============================================================
+# Working directory
+# ============================================================
 
 cd "$SLURM_SUBMIT_DIR"
 
-# ------------------------------------------------------------
-# Paths
-# ------------------------------------------------------------
-
 mkdir -p logs
 
+# ============================================================
+# Job information
+# ============================================================
+
 echo "========================================"
-echo "Job:       $SLURM_JOB_NAME"
-echo "Job ID:    $SLURM_JOB_ID"
-echo "Node:      $(hostname)"
-echo "Start:     $(date)"
-echo "CPUs:      $SLURM_CPUS_PER_TASK"
+echo "Job:        $SLURM_JOB_NAME"
+echo "Job ID:     $SLURM_JOB_ID"
+echo "Node:       $(hostname)"
+echo "Start:      $(date)"
+echo "CPUs:       $SLURM_CPUS_PER_TASK"
 echo "Working dir:"
 pwd
 echo "========================================"
 
-# ------------------------------------------------------------
+echo "Prior File:"
+echo "  $PRIOR_PATH"
+
+echo "Input JSONL:"
+echo "  $INPUT_JSONL_PATH"
+
+echo "Output JSONL:"
+echo "  $OUTPUT_JSONL_PATH"
+
+echo "========================================"
+
+# ============================================================
 # Run
-# ------------------------------------------------------------
+# ============================================================
 
-python apply_prior_v3.py
+python apply_prior.py \
+    --prior "$PRIOR_PATH" \
+    --input "$INPUT_JSONL_PATH" \
+    --output "$OUTPUT_JSONL_PATH"
 
-# ------------------------------------------------------------
+# ============================================================
 # Finished
-# ------------------------------------------------------------
+# ============================================================
 
 echo "========================================"
 echo "Finished: $(date)"
