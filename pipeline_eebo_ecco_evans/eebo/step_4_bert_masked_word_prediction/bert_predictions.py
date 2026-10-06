@@ -1,13 +1,21 @@
 """
 BERT Masked Word Prediction Script (multi-GPU, batch_size configurable, fp16, length-bucketed)
 =====================================================================
-Dataset-agnostic: one script for BL Microsoft, HMD, and LWM. Set
-BERT_DATASET=bl_microsoft|hmd|lwm (default: bl_microsoft) to select the
-right filename prefix, default suffix, and default input/output dirs.
-Everything else -- GPU workers, batching, prepare_text, length-bucketing,
-logging -- is identical regardless of dataset, since step-5 output from
-all three pipelines shares the same row schema (sentence, masked_sentence,
-plus dataset-specific metadata columns).
+Dataset-agnostic: one script for BL Microsoft, HMD, LWM, and the TCP
+datasets (EEBO/ECCO/Evans). Set
+BERT_DATASET=bl_microsoft|hmd|lwm|evans|eebo|ecco (default: bl_microsoft)
+to select the right filename prefix, default suffix, step tag, default
+input/output dirs, and model set. Everything else -- GPU workers,
+batching, prepare_text, length-bucketing, logging -- is identical
+regardless of dataset, since step output from every pipeline shares the
+same row schema (sentence, masked_sentence, plus dataset-specific
+metadata columns).
+
+Model sets by dataset (see MODELS_BY_DATASET below):
+  - bl_microsoft, hmd, lwm: bert_1760_1850, bert_1890_1900,
+    bert-base-uncased, bert_1760_1900 (4 models).
+  - evans, eebo, ecco: bert_1760_1900, bert-base-uncased,
+    eccobert-base-cased-v1 (3 models).
 
 File selection
 --------------
@@ -178,21 +186,27 @@ MODELS_BY_DATASET = {
 MODELS_BY_DATASET["hmd"] = MODELS_BY_DATASET["bl_microsoft"]
 MODELS_BY_DATASET["lwm"] = MODELS_BY_DATASET["bl_microsoft"]
 
-# TCP datasets (EEBO/ECCO/Evans): models not yet decided. Two placeholder
-# columns so the pipeline plumbing (worker/output schema/launchers) is
-# ready to go the moment real model paths/names are chosen -- just fill
-# in the two empty strings below. worker() refuses to start with a clear
-# error if a selected model path is still empty, rather than failing
-# deep inside transformers.from_pretrained() with a confusing error.
-_TCP_PLACEHOLDER_MODELS = {
-    "pred_model_1": "",  # TODO: fill in once decided, e.g. f"{MODELS_BASE}/some_model"
-    "pred_model_2": "",  # TODO: fill in once decided
+# TCP datasets (EEBO/ECCO/Evans): three models, decided.
+#   - bert_1760_1900 and bert-base-uncased are the same checkpoints already
+#     used for BL Microsoft/HMD/LWM (pred_bert_1760_1900 / pred_bert_contemporary),
+#     reused here under the same column names for consistency across pipelines.
+#   - eccobert-base-cased-v1 (TurkuNLP) is new for these three datasets.
+#     Locally downloaded under an underscored folder name
+#     (eccobert_base_cased_v1) rather than the hyphenated Hugging Face name
+#     (eccobert-base-cased-v1) -- the path below uses the local folder name.
+# worker() still guards against any empty path here (e.g. if a future
+# dataset is added before its models are decided), failing with a clear
+# error rather than deep inside transformers.from_pretrained().
+_TCP_MODELS = {
+    "pred_bert_1760_1900":         f"{MODELS_BASE}/bert_1760_1900",
+    "pred_bert_contemporary":      f"{MODELS_BASE}/bert-base-uncased",
+    "pred_eccobert_base_cased_v1": f"{MODELS_BASE}/eccobert_base_cased_v1",
 }
-MODELS_BY_DATASET["evans"] = dict(_TCP_PLACEHOLDER_MODELS)
-MODELS_BY_DATASET["eebo"]  = dict(_TCP_PLACEHOLDER_MODELS)
-MODELS_BY_DATASET["ecco"]  = dict(_TCP_PLACEHOLDER_MODELS)
+MODELS_BY_DATASET["evans"] = dict(_TCP_MODELS)
+MODELS_BY_DATASET["eebo"]  = dict(_TCP_MODELS)
+MODELS_BY_DATASET["ecco"]  = dict(_TCP_MODELS)
 
-MODELS = MODELS_BY_DATASET.get(BERT_DATASET, _TCP_PLACEHOLDER_MODELS)
+MODELS = MODELS_BY_DATASET.get(BERT_DATASET, _TCP_MODELS)
 
 INPUT_DIR = os.environ.get("BERT_INPUT_DIR", _defaults.get("input_dir", "."))
 OUTPUT_DIR = os.environ.get("BERT_OUTPUT_DIR", _defaults.get("output_dir", "./predictions"))

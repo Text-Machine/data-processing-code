@@ -19,7 +19,7 @@ cd "$SLURM_SUBMIT_DIR"
 # is unchanged, it's dataset-agnostic (only ever touches sentence /
 # masked_sentence fields, same schema across all three via filter_tcp.py).
 
-DATASET="evans"
+DATASET="eebo"
 
 case "$DATASET" in
     evans|eebo|ecco) ;;
@@ -42,7 +42,7 @@ mkdir -p "$OUTPUT_DIR"
 # first, fall back to singular QUERY_WORD, error if neither is set. This
 # also determines FILTER_WORDS inside unroll_masks.py via --query-words.
 
-QUERY_CONFIG="${SLURM_SUBMIT_DIR}/query_word_config.sh"
+QUERY_CONFIG="${SLURM_SUBMIT_DIR}/../query_word_config.sh"
 
 if [[ ! -f "$QUERY_CONFIG" ]]; then
     echo "ERROR: query-word configuration not found: $QUERY_CONFIG"

@@ -2,7 +2,7 @@
 #SBATCH --job-name=bert_preds_tcp
 #SBATCH --output=logs/bert_preds_tcp_%j.log
 #SBATCH --error=logs/bert_preds_tcp_%j.err
-#SBATCH --time=00:30:00
+#SBATCH --time=00:10:00
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=40

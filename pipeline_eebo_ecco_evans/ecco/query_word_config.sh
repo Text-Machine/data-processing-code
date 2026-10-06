@@ -1,1 +1,1 @@
-QUERY_WORDS=("machine" "machines")
+QUERY_WORDS=("clock" "electric" "telegraph")

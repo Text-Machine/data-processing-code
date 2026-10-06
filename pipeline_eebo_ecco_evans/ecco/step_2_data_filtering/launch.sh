@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=2
 #SBATCH --cpus-per-task=8
-#SBATCH --time=00:05:00
+#SBATCH --time=00:15:00
 #SBATCH --account=bsc100
 #SBATCH --qos=gp_debug
 #SBATCH --exclusive
@@ -52,7 +52,7 @@ fi
 # Query words
 # ---------------------------------------------------------------------------
 
-QUERY_CONFIG="${SLURM_SUBMIT_DIR}/query_word_config.sh"
+QUERY_CONFIG="${SLURM_SUBMIT_DIR}/../query_word_config.sh"
 
 if [[ ! -f "$QUERY_CONFIG" ]]; then
     echo "ERROR: query-word configuration not found:"
@@ -76,7 +76,7 @@ echo "Words this run: ${QUERY_WORDS[*]}"
 
 OUTPUT_DIR="/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_${DATASET}"
 LOG_DIR="$SLURM_SUBMIT_DIR/logs_filter_${DATASET}"
-SCRIPT="$SLURM_SUBMIT_DIR/query_word_filter_v3.py"
+SCRIPT="$SLURM_SUBMIT_DIR/query_word_filter.py"
 
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$LOG_DIR"

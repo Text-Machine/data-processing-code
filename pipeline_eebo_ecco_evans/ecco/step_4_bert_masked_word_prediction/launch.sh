@@ -2,10 +2,10 @@
 #SBATCH --job-name=bert_preds_tcp
 #SBATCH --output=logs/bert_preds_tcp_%j.log
 #SBATCH --error=logs/bert_preds_tcp_%j.err
-#SBATCH --time=00:30:00
+#SBATCH --time=00:25:00
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=40
+#SBATCH --gres=gpu:3
+#SBATCH --cpus-per-task=60
 ##SBATCH --qos=acc_bsccssh
 #SBATCH --qos=acc_debug
 #SBATCH --account=bsc100
@@ -34,7 +34,7 @@ export BERT_QUERY_WORDS="$(IFS=,; echo "${QUERY_WORDS[*]}")"
 #export BERT_QUERY_WORDS="machine,machines"
 
 # --- Resource / precision knobs ------------------------------------------
-export BERT_MAX_GPUS="2"   # match --gres=gpu:N above; also auto-capped to
+export BERT_MAX_GPUS="3"   # match --gres=gpu:N above; also auto-capped to
                             # the number of matched query-word files
 export BERT_BATCH_SIZE="256"
 export BERT_DTYPE="float16"
