@@ -22,7 +22,7 @@ export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
 source "${SLURM_SUBMIT_DIR}/../query_word_config.sh"
 WORDS=("${QUERY_WORDS[@]}")
 
-OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata/
+OUTPUT_DIR=/gpfs/projects/bsc100/textmachine-data/preprocessed_data/consolidated_metadata_blmicrosoft/
 LOG_DIR="$SLURM_SUBMIT_DIR/logs_filter_blmicrosoft"
 SCRIPT="$SLURM_SUBMIT_DIR/filter_data_blmicrosoft_spacy.py"
 

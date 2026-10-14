@@ -100,16 +100,30 @@ MODEL_DTYPE = _DTYPE_MAP[os.environ.get("BERT_DTYPE", "float16").lower()]
 # Config  (all paths/words overridable via environment variables)
 # -------------------------------------------------------------------
 
+# -------------------------------------------------------------------
+# Model configuration
+# -------------------------------------------------------------------
+
 MODELS_BASE = os.environ.get(
     "BERT_MODELS_BASE",
     "/gpfs/projects/bsc100/models/bert_textmachine",
 )
 
 MODELS = {
-    "pred_bert_1760_1850":    f"{MODELS_BASE}/bert_1760_1850",
-    "pred_bert_1890_1900":    f"{MODELS_BASE}/bert_1890_1900",
-    "pred_bert_contemporary": f"{MODELS_BASE}/bert-base-uncased",
-    "pred_bert_1760_1900":    f"{MODELS_BASE}/bert_1760_1900",
+    "pred_bert_1760_1900": os.environ.get(
+        "BERT_MODEL_LWM",
+        f"{MODELS_BASE}/bert_1760_1900",
+    ),
+
+    "pred_bert_base_uncased": os.environ.get(
+        "BERT_MODEL_BASE_UNCASED",
+        f"{MODELS_BASE}/bert-base-uncased",
+    ),
+
+    "pred_eccobert_base_cased_v1": os.environ.get(
+        "BERT_MODEL_ECCOBERT",
+        f"{MODELS_BASE}/eccobert_base_cased_v1",
+    ),
 }
 
 INPUT_DIR = os.environ.get(
