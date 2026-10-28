@@ -1,0 +1,1 @@
+QUERY_WORDS=("clock" "electric" "telegraph")
