@@ -8,7 +8,7 @@ This document describes the end-to-end pipeline for producing fully processed, q
 
 EEBO, ECCO, and Evans are processed as three **independent, parallel pipelines** that mirror each other step for step — same stage names, same script logic, different input data. Each dataset has its own directory, its own `query_word_config.sh`, and is run separately.
 
-> **Note:** This requires having downloaded the relevant raw datasets first (the EEBO/ECCO XML archives, the Evans zip — see step 1 for exact source paths). Model paths for step 4 are **not yet finalized** for these three datasets — see the Step 4 section below before expecting real predictions out of that step.
+> **Note:** This requires having downloaded the relevant raw datasets first (the EEBO/ECCO XML archives, the Evans zip — see step 1 for exact source paths).
 
 ---
 
@@ -87,7 +87,7 @@ ecco_final_machine.jsonl
 | 1 | `step_1_preprocessing_and_metadata_extraction/` | Converts the raw XML/zip archive into one plain-text file per book plus a metadata CSV. |
 | 2 | `step_2_data_filtering/` | Filters records by query word, with sentence-level output including context sentences and masked versions. Output files are tagged `_step2`. |
 | 3 | `step_3_mask_unrolling/` | Unrolls rows containing multiple instances of the query word, so each output row contains exactly one `[MASK]` token. Output files are tagged `_step3`. |
-| 4 | `step_4_bert_masked_word_prediction/` | Runs masked-word prediction using the BERT models, one GPU per query word (up to the number of GPUs requested). **Model paths are currently placeholders — see below.** |
+| 4 | `step_4_bert_masked_word_prediction/` | Runs masked-word prediction using the BERT models, one GPU per query word (up to the number of GPUs requested).
 
 > **Naming convention note:** these three datasets use `_step2` / `_step3` tags (no underscore before the digit), which differs from BL Microsoft/HMD/LwM's `_step_4` / `_step_5` convention. `unroll_masks.py` (step 3) auto-detects and increments whichever style it finds, so this doesn't require separate scripts — just be aware the tag looks different if you're used to reading the other pipelines' filenames.
 
@@ -191,7 +191,12 @@ sbatch launch_unroll_tcp.sh   # DATASET="ecco"
 
 Runs masked-word prediction over the dataset, using the same multi-GPU `bert_predictions.py` engine as BL Microsoft/HMD/LwM (one GPU per query word, dynamic scheduling if word count exceeds GPU count — see GPU allocation below).
 
-> **Model paths are not yet decided for EEBO, ECCO, or Evans.** `MODELS_BY_DATASET` in `bert_predictions.py` currently has two placeholder columns (`pred_model_1`, `pred_model_2`) with empty paths for all three datasets. Running step 4 as-is will discover the correct step-3 files, spin up workers, and then each worker will log a clear error and exit without attempting to load anything — it will **not** silently produce empty or wrong output, and it will **not** crash with a confusing `transformers` traceback. Fill in the two placeholder paths in `bert_predictions.py` once models are chosen, then rerun.
+> **Model paths** `MODELS_BY_DATASET` in `bert_predictions.py` should use the models defined under `/gpfs/projects/bsc100/models/bert_textmachine`:
+>
+> - `pred_bert_1760_1900`: `/gpfs/projects/bsc100/models/bert_textmachine/bert_1760_1900`
+> - `pred_bert_contemporary`: `/gpfs/projects/bsc100/models/bert_textmachine/bert-base-uncased`
+> - `pred_eccobert_base_cased_v1`: `/gpfs/projects/bsc100/models/bert_textmachine/eccobert_base_cased_v1`
+
 
 ```bash
 cd evans/step_4_bert_masked_word_prediction/
